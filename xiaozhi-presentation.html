@@ -1,0 +1,1027 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>XiaoZhi 语音助手项目介绍</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, "SF Pro Display", "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #1a1a2e;
+  color: #eee;
+  overflow: hidden;
+  height: 100vh;
+}
+.slide {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 60px 80px;
+  opacity: 0;
+  transform: translateX(50px);
+  transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+.slide.active {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
+}
+.slide.prev {
+  transform: translateX(-50px);
+  opacity: 0;
+}
+
+/* 主题色变体 */
+.slide.title-slide {
+  background: linear-gradient(135deg, #0f3460 0%, #16213e 50%, #533483 100%);
+}
+.slide.content-slide {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+}
+.slide.feature-slide {
+  background: linear-gradient(135deg, #0f3460 0%, #1a1a2e 100%);
+}
+.slide.end-slide {
+  background: linear-gradient(135deg, #533483 0%, #0f3460 100%);
+}
+
+h1 {
+  font-size: 3.5em;
+  margin-bottom: 20px;
+  background: linear-gradient(90deg, #e94560, #f5a623);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-align: center;
+}
+h2 {
+  font-size: 2.4em;
+  margin-bottom: 40px;
+  color: #e94560;
+  border-bottom: 3px solid #e94560;
+  padding-bottom: 10px;
+  display: inline-block;
+}
+h3 {
+  font-size: 1.6em;
+  color: #f5a623;
+  margin-bottom: 15px;
+}
+
+p {
+  font-size: 1.3em;
+  line-height: 1.6;
+  margin-bottom: 15px;
+  color: #ccc;
+}
+
+ul, ol {
+  font-size: 1.2em;
+  line-height: 1.8;
+  color: #ccc;
+  margin-left: 30px;
+}
+li { margin-bottom: 8px; }
+
+.subtitle {
+  font-size: 1.5em;
+  color: #aaa;
+  margin-top: 20px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 30px;
+  width: 100%;
+  max-width: 1200px;
+}
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 25px;
+  width: 100%;
+  max-width: 1200px;
+}
+
+.card {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 25px;
+  backdrop-filter: blur(10px);
+}
+.card h3 { margin-bottom: 12px; }
+.card p { font-size: 1.05em; margin: 0; }
+
+.code-block {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 20px;
+  font-family: "SF Mono", Consolas, monospace;
+  font-size: 0.95em;
+  color: #c9d1d9;
+  margin: 20px 0;
+  width: 100%;
+  max-width: 1000px;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+.code-block .keyword { color: #ff7b72; }
+.code-block .string { color: #a5d6ff; }
+.code-block .comment { color: #8b949e; }
+
+.highlight {
+  color: #f5a623;
+  font-weight: bold;
+}
+.red { color: #e94560; }
+.green { color: #4ade80; }
+.blue { color: #60a5fa; }
+
+.badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.85em;
+  margin-right: 8px;
+  margin-bottom: 8px;
+}
+.badge-red { background: rgba(233, 69, 96, 0.2); color: #e94560; border: 1px solid #e94560; }
+.badge-green { background: rgba(74, 222, 128, 0.2); color: #4ade80; border: 1px solid #4ade80; }
+.badge-blue { background: rgba(96, 165, 250, 0.2); color: #60a5fa; border: 1px solid #60a5fa; }
+.badge-yellow { background: rgba(245, 166, 35, 0.2); color: #f5a623; border: 1px solid #f5a623; }
+
+.flow-diagram {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 15px;
+  margin: 30px 0;
+}
+.flow-step {
+  background: rgba(233, 69, 96, 0.15);
+  border: 2px solid #e94560;
+  border-radius: 10px;
+  padding: 15px 25px;
+  text-align: center;
+  font-size: 1.05em;
+  min-width: 120px;
+}
+.flow-arrow {
+  font-size: 1.8em;
+  color: #f5a623;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  max-width: 1100px;
+  margin: 20px 0;
+}
+th, td {
+  border: 1px solid #30363d;
+  padding: 12px 20px;
+  text-align: left;
+  font-size: 1.05em;
+}
+th { background: #21262d; color: #f5a623; }
+tr:nth-child(even) { background: rgba(255,255,255,0.03); }
+
+.nav-controls {
+  position: fixed;
+  bottom: 30px;
+  right: 40px;
+  display: flex;
+  gap: 15px;
+  z-index: 100;
+}
+.nav-btn {
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  border: 2px solid #e94560;
+  background: rgba(233, 69, 96, 0.2);
+  color: #fff;
+  font-size: 1.3em;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s;
+}
+.nav-btn:hover { background: #e94560; transform: scale(1.1); }
+
+.slide-counter {
+  position: fixed;
+  bottom: 35px;
+  left: 40px;
+  color: #888;
+  font-size: 1em;
+}
+
+.title-icon {
+  font-size: 5em;
+  margin-bottom: 20px;
+}
+
+.stat {
+  text-align: center;
+}
+.stat .num {
+  font-size: 3em;
+  font-weight: bold;
+  background: linear-gradient(90deg, #e94560, #f5a623);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.stat .label {
+  font-size: 1.1em;
+  color: #aaa;
+  margin-top: 5px;
+}
+
+/* 打印样式：所有幻灯片垂直排列，每页一张 */
+@media print {
+  body {
+    background: white;
+    overflow: visible;
+    height: auto;
+  }
+  .slide {
+    position: relative;
+    opacity: 1 !important;
+    transform: none !important;
+    pointer-events: auto !important;
+    page-break-after: always;
+    page-break-inside: avoid;
+    width: 100%;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 40px 60px;
+  }
+  .nav-controls, .slide-counter {
+    display: none !important;
+  }
+}
+</style>
+</head>
+<body>
+
+<!-- Slide 1: 标题 -->
+<div class="slide title-slide active">
+  <div class="title-icon">🎙️</div>
+  <h1>XiaoZhi 语音助手</h1>
+  <p class="subtitle">基于 ESP32-S3-Touch-LCD-3.49 v2 的智能语音交互设备</p>
+  <p class="subtitle" style="margin-top: 40px;">ESP-IDF v6.0.2 · LVGL 9 · MQTT/WebSocket · Opus 编码</p>
+</div>
+
+<!-- Slide 2: 项目概述 -->
+<div class="slide content-slide">
+  <h2>项目概述</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>🎯 项目定位</h3>
+      <p>XiaoZhi 是一个开源的 ESP32 语音助手固件，支持多种芯片、显示屏、音频设备和网络传输方式，通过 WiFi 连接云端 AI 实现语音对话。</p>
+    </div>
+    <div class="card">
+      <h3>🏗️ 架构特点</h3>
+      <p>板级抽象设计，一套核心代码支持多种硬件；通过 OTA 服务器配置协议（MQTT/WebSocket），设备激活后即插即用。</p>
+    </div>
+    <div class="card">
+      <h3>🌐 服务集成</h3>
+      <p>连接云端 AI 服务，支持语音识别（ASR）、大语言模型对话（LLM）、语音合成（TTS），以及 MCP 工具调用。</p>
+    </div>
+    <div class="card">
+      <h3>🔧 本项目定制</h3>
+      <p>基于 Waveshare ESP32-S3-Touch-LCD-3.49 v2 开发板，定制了屏幕旋转、电池监控、IMU 姿态唤醒、主题切换等功能。</p>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 3: 硬件平台 -->
+<div class="slide feature-slide">
+  <h2>硬件平台</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>📋 核心规格</h3>
+      <ul>
+        <li><span class="blue">芯片：</span>ESP32-S3 双核 240MHz</li>
+        <li><span class="blue">Flash：</span>16MB</li>
+        <li><span class="blue">PSRAM：</span>8MB OCT PSRAM</li>
+        <li><span class="blue">WiFi：</span>802.11 b/g/n</li>
+        <li><span class="blue">蓝牙：</span>BLE 4.2</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>🖥️ 显示触摸</h3>
+      <ul>
+        <li><span class="green">屏幕：</span>3.49" 彩色 LCD</li>
+        <li><span class="green">分辨率：</span>172×640（竖屏）</li>
+        <li><span class="green">驱动：</span>AXS15231B（QSPI）</li>
+        <li><span class="green">触摸：</span>FT5x06（I2C）</li>
+        <li><span class="green">接口：</span>QSPI + I2C</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>🔊 音频</h3>
+      <ul>
+        <li><span class="yellow">输出 DAC：</span>ES8311</li>
+        <li><span class="yellow">输入 ADC：</span>ES7210（4通道）</li>
+        <li><span class="yellow">扬声器：</span>板载</li>
+        <li><span class="yellow">麦克风：</span>双 MEMS</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>📡 传感器与电源</h3>
+      <ul>
+        <li><span class="red">IMU：</span>QMI8658（加速度+陀螺仪）</li>
+        <li><span class="red">电池：</span>内置锂电池 + ADC 监控</li>
+        <li><span class="red">分压比：</span>3:1（200kΩ/100kΩ）</li>
+        <li><span class="red">按钮：</span>BOOT + PWR 双键</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 4: 已实现功能概览 -->
+<div class="slide content-slide">
+  <h2>已实现功能概览</h2>
+  <div class="grid-3">
+    <div class="card" style="border-color: #e94560;">
+      <h3 style="color: #e94560;">🖥️ 显示系统</h3>
+      <ul>
+        <li>屏幕 270° 旋转</li>
+        <li>双击切换主题</li>
+        <li>LVGL 9 UI 框架</li>
+        <li>状态栏 + 聊天气泡</li>
+      </ul>
+    </div>
+    <div class="card" style="border-color: #4ade80;">
+      <h3 style="color: #4ade80;">⚡ 电源管理</h3>
+      <ul>
+        <li>电池电量百分比</li>
+        <li>充电/放电状态</li>
+        <li>低电量弹窗提醒</li>
+        <li>ADC 实时采样</li>
+      </ul>
+    </div>
+    <div class="card" style="border-color: #f5a623;">
+      <h3 style="color: #f5a623;">🤸 姿态唤醒</h3>
+      <ul>
+        <li>QMI8658 IMU 读取</li>
+        <li>抬手触发聆听</li>
+        <li>0.1g 灵敏度</li>
+        <li>5秒冷却防误触</li>
+      </ul>
+    </div>
+    <div class="card" style="border-color: #60a5fa;">
+      <h3 style="color: #60a5fa;">🎙️ 语音交互</h3>
+      <ul>
+        <li>自定义唤醒词"你好小威"</li>
+        <li>MultiNet 拼音识别</li>
+        <li>Opus 音频编码</li>
+        <li>VAD 自动停止</li>
+      </ul>
+    </div>
+    <div class="card" style="border-color: #a78bfa;">
+      <h3 style="color: #a78bfa;">🌐 网络通信</h3>
+      <ul>
+        <li>MQTT 协议（默认）</li>
+        <li>WebSocket 协议</li>
+        <li>UDP 音频传输</li>
+        <li>AES-CTR 加密</li>
+      </ul>
+    </div>
+    <div class="card" style="border-color: #fb7185;">
+      <h3 style="color: #fb7185;">⚡ 性能优化</h3>
+      <ul>
+        <li>跳过 OTA 版本检查</li>
+        <li>停用固件自动升级</li>
+        <li>NVS 配置缓存</li>
+        <li>快速启动</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 5: 显示系统 -->
+<div class="slide feature-slide">
+  <h2>显示系统：屏幕旋转</h2>
+  <div class="grid">
+    <div>
+      <h3>🎯 需求</h3>
+      <p>原厂屏幕为 172×640 竖屏，物理按钮在下方会遮挡 UI。需要旋转为横屏显示，按钮朝上。</p>
+      <h3 style="margin-top: 30px;">⚙️ 实现方案</h3>
+      <ul>
+        <li>LVGL 软件旋转 270°</li>
+        <li>逻辑分辨率变为 640×172 横屏</li>
+        <li><code>lv_display_set_rotation(LV_DISPLAY_ROTATION_270)</code></li>
+        <li>flush 回调用 <code>lv_draw_sw_rotate</code> 旋转缓冲区</li>
+      </ul>
+    </div>
+    <div>
+      <h3>📐 坐标变换</h3>
+      <div class="code-block">
+<span class="comment">// 旋转前（竖屏）</span>
+┌──────────┐
+│          │  172 宽
+│   LCD    │
+│          │
+│          │  640 高
+└──────────┘
+
+<span class="comment">// 旋转 270° 后（横屏）</span>
+┌──────────────────────────┐
+│                          │
+│         LCD              │  172 高
+│                          │
+└──────────────────────────┘
+            640 宽
+<span class="comment">// 按钮从下方移到上方</span>
+      </div>
+      <p>UI 使用 <span class="highlight">LV_HOR_RES/LV_VER_RES</span> 动态宏，自动适配旋转后的分辨率。</p>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 6: 主题切换 -->
+<div class="slide content-slide">
+  <h2>显示系统：主题切换</h2>
+  <div class="grid">
+    <div>
+      <h3>🎨 双主题系统</h3>
+      <table>
+        <tr><th>主题</th><th>背景色</th><th>文字色</th></tr>
+        <tr><td>Light</td><td>白色 0xFFFFFF</td><td>黑色 0x000000</td></tr>
+        <tr><td>Dark</td><td>黑色 0x000000</td><td>白色 0xFFFFFF</td></tr>
+      </table>
+      <h3 style="margin-top: 20px;">🖱️ 触摸交互</h3>
+      <ul>
+        <li><span class="highlight">双击</span>屏幕任意位置切换</li>
+        <li>LVGL 事件冒泡机制</li>
+        <li>主题持久化到 NVS</li>
+        <li>重启保持上次选择</li>
+      </ul>
+    </div>
+    <div>
+      <h3>🔄 工作流程</h3>
+      <div class="code-block">
+<span class="comment">// CustomLcdDisplay::SetupUI()</span>
+<span class="keyword">void</span> SetupUI() <span class="keyword">override</span> {
+    LcdDisplay::SetupUI();  <span class="comment">// 父类初始化</span>
+
+    <span class="comment">// 给子对象添加事件冒泡</span>
+    <span class="keyword">for</span> (child : container_->children) {
+        lv_obj_add_flag(child, LV_OBJ_FLAG_EVENT_BUBBLE);
+    }
+
+    <span class="comment">// 注册双击事件</span>
+    lv_obj_add_event_cb(container_,
+        OnThemeSwitchEvent,
+        LV_EVENT_DOUBLE_CLICKED,
+        <span class="keyword">this</span>);
+}
+
+<span class="comment">// 切换 light ↔ dark</span>
+<span class="keyword">void</span> OnThemeSwitchEvent(e) {
+    next = (current == <span class="string">"light"</span>) ? <span class="string">"dark"</span> : <span class="string">"light"</span>;
+    SetTheme(GetTheme(next));  <span class="comment">// 重绘+保存</span>
+}
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 7: 电池监控 -->
+<div class="slide feature-slide">
+  <h2>电池电量监控</h2>
+  <div class="grid">
+    <div>
+      <h3>🔋 硬件电路</h3>
+      <ul>
+        <li>ADC1 通道 3（GPIO4）</li>
+        <li>分压电阻：200kΩ / 100kΩ</li>
+        <li>分压比 3:1</li>
+        <li>测量范围：0-3.3V × 3 = 0-9.9V</li>
+      </ul>
+      <h3 style="margin-top: 20px;">📊 软件实现</h3>
+      <ul>
+        <li><code>AdcBatteryMonitor</code> 类</li>
+        <li>1Hz 采样频率</li>
+        <li>滑动平均滤波</li>
+        <li>电量百分比映射</li>
+      </ul>
+    </div>
+    <div>
+      <h3>📈 状态输出</h3>
+      <div class="code-block">
+<span class="comment">// GetBatteryLevel() 返回</span>
+struct BatteryInfo {
+    int8_t level;       <span class="comment">// 0-100 百分比</span>
+    bool charging;      <span class="comment">// 是否充电中</span>
+    bool discharging;   <span class="comment">// 是否放电中</span>
+};
+
+<span class="comment">// 实测数据</span>
+Battery: level=<span class="string">96%</span>, charging=<span class="string">0</span>, discharging=<span class="string">1</span>
+      </div>
+      <h3>🖥️ UI 集成</h3>
+      <p>状态栏自动显示电池图标，低电量（&lt;20%）弹出提醒窗口。</p>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 8: IMU 姿态唤醒 -->
+<div class="slide content-slide">
+  <h2>IMU 姿态唤醒</h2>
+  <div class="grid">
+    <div>
+      <h3>🎯 功能描述</h3>
+      <p>通过 IMU 检测设备姿态变化，<span class="highlight">抬手或翻转设备</span>自动进入聆听模式，无需按按钮或说唤醒词。</p>
+      <h3 style="margin-top: 20px;">⚙️ 实现参数</h3>
+      <table>
+        <tr><th>参数</th><th>值</th></tr>
+        <tr><td>传感器</td><td>QMI8658</td></tr>
+        <tr><td>接口</td><td>I2C（音频总线共用）</td></tr>
+        <tr><td>采样率</td><td>5Hz</td></tr>
+        <tr><td>触发阈值</td><td>0.1g（极灵敏）</td></tr>
+        <tr><td>冷却时间</td><td>5 秒</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>🔄 工作流程</h3>
+      <div class="flow-diagram" style="flex-direction: column; align-items: stretch;">
+        <div class="flow-step">IMU 采样加速度</div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step">计算合成加速度</div>
+        <div class="flow-arrow">↓</div>
+        <div class="flow-step">变化量 &gt; 0.1g?</div>
+        <div class="flow-arrow">↓ 是</div>
+        <div class="flow-step" style="border-color: #4ade80;">检查冷却时间</div>
+        <div class="flow-arrow">↓ 通过</div>
+        <div class="flow-step" style="border-color: #f5a623;">ToggleChatState() 进入聆听</div>
+      </div>
+      <p style="margin-top: 20px;">使用 <code>ToggleChatState()</code> 而非 <code>StartListening()</code>，确保 AutoStop 模式说完话自动退出。</p>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 9: 语音唤醒 -->
+<div class="slide feature-slide">
+  <h2>语音唤醒：自定义唤醒词</h2>
+  <div class="grid">
+    <div>
+      <h3>🎙️ 唤醒词配置</h3>
+      <div class="card" style="background: rgba(245,166,35,0.1);">
+        <p style="font-size: 1.5em; text-align: center;"><span class="highlight">"你好小威"</span></p>
+        <p style="text-align: center;">拼音：ni hao xiao wei</p>
+      </div>
+      <h3 style="margin-top: 20px;">⚙️ 技术方案</h3>
+      <ul>
+        <li><span class="blue">模式：</span>MultiNet 自定义唤醒词</li>
+        <li><span class="blue">模型：</span>ESP-SR Multinet</li>
+        <li><span class="blue">阈值：</span>20（1-99，越小越灵敏）</li>
+        <li><span class="blue">配置：</span>NVS 持久化</li>
+      </ul>
+    </div>
+    <div>
+      <h3>📋 AFE vs MultiNet 对比</h3>
+      <table>
+        <tr><th>特性</th><th>AFE WakeNet</th><th>MultiNet</th></tr>
+        <tr><td>唤醒词</td><td>固定（你好小智等）</td><td class="green">任意拼音</td></tr>
+        <tr><td>识别精度</td><td class="green">高</td><td>中等</td></tr>
+        <tr><td>打断 AI</td><td class="green">✅ 支持</td><td>❌ 不支持</td></tr>
+        <tr><td>资源占用</td><td>高</td><td class="green">低</td></tr>
+      </table>
+      <p style="margin-top: 15px;">本项目选择 MultiNet 以支持自定义唤醒词"你好小威"，代价是不能打断 AI 回复。</p>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 10: 音频系统 -->
+<div class="slide content-slide">
+  <h2>音频系统架构</h2>
+  <div class="flow-diagram" style="flex-direction: column; align-items: stretch; max-width: 1100px;">
+    <h3 style="text-align: center;">上行：麦克风 → 服务器</h3>
+    <div style="display: flex; justify-content: center; gap: 10px; flex-wrap: wrap;">
+      <div class="flow-step">🎤 麦克风</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">ES7210 ADC</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">重采样 16kHz</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">AFE 引擎<br/><small>唤醒词/VAD/AEC</small></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Opus 编码</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step" style="border-color: #4ade80;">📡 发送</div>
+    </div>
+  </div>
+  <div class="flow-diagram" style="flex-direction: column; align-items: stretch; max-width: 1100px; margin-top: 30px;">
+    <h3 style="text-align: center;">下行：服务器 → 扬声器</h3>
+    <div style="display: flex; justify-content: center; gap: 10px; flex-wrap: wrap;">
+      <div class="flow-step" style="border-color: #60a5fa;">📡 接收</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Opus 解码</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">重采样</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">ES8311 DAC</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step" style="border-color: #4ade80;">🔊 扬声器</div>
+    </div>
+  </div>
+  <div style="margin-top: 30px; text-align: center;">
+    <span class="badge badge-red">Opus 16kHz/16bit</span>
+    <span class="badge badge-yellow">VAD 语音检测</span>
+    <span class="badge badge-green">AEC 回声消除</span>
+    <span class="badge badge-blue">多队列缓冲</span>
+  </div>
+</div>
+
+<!-- Slide 11: 协议架构 -->
+<div class="slide feature-slide">
+  <h2>网络协议架构</h2>
+  <div class="grid">
+    <div>
+      <h3>📡 MQTT 协议（默认）</h3>
+      <div class="card" style="border-color: #e94560;">
+        <p><strong>控制通道：</strong>MQTT publish/subscribe</p>
+        <p><strong>音频通道：</strong>UDP + AES-CTR 加密</p>
+        <p><strong>默认端口：</strong>8883（TLS）</p>
+        <p><strong>心跳：</strong>90 秒 ping</p>
+        <p><strong>重连：</strong>60 秒自动重连</p>
+      </div>
+      <p style="margin-top: 15px;">MQTT 用 UDP 传输音频以降低延迟，控制指令用 MQTT 保证可靠性。</p>
+    </div>
+    <div>
+      <h3>🌐 WebSocket 协议</h3>
+      <div class="card" style="border-color: #60a5fa;">
+        <p><strong>控制通道：</strong>WebSocket text frame</p>
+        <p><strong>音频通道：</strong>WebSocket binary frame</p>
+        <p><strong>默认端口：</strong>443（TLS）</p>
+        <p><strong>单连接：</strong>文本+音频共用</p>
+      </div>
+      <p style="margin-top: 15px;">WebSocket 单通道更简单，但音频延迟略高于 UDP。</p>
+    </div>
+  </div>
+  <div style="margin-top: 30px;">
+    <h3>🔄 协议选择流程</h3>
+    <div class="flow-diagram">
+      <div class="flow-step">OTA 服务器</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">返回配置</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">有 MQTT 配置?</div>
+      <div class="flow-arrow">→ 是</div>
+      <div class="flow-step" style="border-color: #e94560;">用 MQTT</div>
+      <div class="flow-arrow" style="color: #888;">| 否</div>
+      <div class="flow-step" style="border-color: #60a5fa;">有 WebSocket?</div>
+      <div class="flow-arrow">→ 是</div>
+      <div class="flow-step" style="border-color: #60a5fa;">用 WebSocket</div>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 12: 数据传输路径 -->
+<div class="slide content-slide">
+  <h2>数据传输路径</h2>
+  <div class="code-block">
+<span class="comment">// 设备 → 服务器：控制指令（JSON）</span>
+{
+  <span class="string">"session_id"</span>: <span class="string">"xxx"</span>,
+  <span class="string">"type"</span>: <span class="string">"listen"</span>,
+  <span class="string">"state"</span>: <span class="string">"start"</span>,
+  <span class="string">"mode"</span>: <span class="string">"auto"</span>     <span class="comment">// auto/manual/realtime</span>
+}
+
+<span class="comment">// 服务器 → 设备：TTS 回复</span>
+{
+  <span class="string">"type"</span>: <span class="string">"tts"</span>,
+  <span class="string">"text"</span>: <span class="string">"你好，我是小威"</span>,
+  <span class="string">"audio_url"</span>: <span class="string">"https://.../xxx.mp3"</span>
+}
+
+<span class="comment">// 服务器 → 设备：MCP 工具调用</span>
+{
+  <span class="string">"type"</span>: <span class="string">"mcp"</span>,
+  <span class="string">"method"</span>: <span class="string">"tools/call"</span>,
+  <span class="string">"params"</span>: {<span class="string">"name"</span>: <span class="string">"self.reboot"</span>}
+}
+
+<span class="comment">// 设备 → 服务器：音频流（Opus 编码后）</span>
+[二进制数据：Opus 帧 + 序列号 + AES-CTR 加密]
+  </div>
+  <p style="margin-top: 20px; text-align: center;">
+    <span class="badge badge-red">JSON 控制指令</span>
+    <span class="badge badge-yellow">Opus 音频流</span>
+    <span class="badge badge-green">AES-CTR 加密</span>
+    <span class="badge badge-blue">UDP 低延迟</span>
+  </p>
+</div>
+
+<!-- Slide 13: 设备状态机 -->
+<div class="slide feature-slide">
+  <h2>设备状态机</h2>
+  <div class="flow-diagram" style="flex-direction: column; align-items: stretch; max-width: 1000px; margin: 0 auto;">
+    <div style="display: flex; justify-content: center; gap: 15px; flex-wrap: wrap;">
+      <div class="flow-step" style="border-color: #888;">starting</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step" style="border-color: #f5a623;">activating</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step" style="border-color: #4ade80;">idle</div>
+    </div>
+    <div style="text-align: center; margin: 20px 0;">↓ ToggleChatState() / 唤醒词 / IMU</div>
+    <div style="display: flex; justify-content: center; gap: 15px; flex-wrap: wrap;">
+      <div class="flow-step" style="border-color: #60a5fa;">connecting</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step" style="border-color: #e94560;">listening</div>
+      <div class="flow-arrow">→ VAD 静音</div>
+      <div class="flow-step" style="border-color: #a78bfa;">speaking</div>
+    </div>
+    <div style="text-align: center; margin: 20px 0;">
+      ↓ AI 回复完毕<br/>
+      <span class="green">AutoStop:</span> 回 listening → 静音超时 → idle<br/>
+      <span class="yellow">ManualStop:</span> 直接回 idle
+    </div>
+  </div>
+  <p style="margin-top: 30px; text-align: center;">
+    状态转换通过 <code>SetDeviceState()</code>，所有 UI 更新通过事件回调异步执行。
+  </p>
+</div>
+
+<!-- Slide 14: OTA 与激活 -->
+<div class="slide content-slide">
+  <h2>OTA 与设备激活</h2>
+  <div class="grid">
+    <div>
+      <h3>📋 激活流程</h3>
+      <ol>
+        <li>设备连接 WiFi</li>
+        <li>请求 <code>api.tenclass.net/xiaozhi/ota/</code></li>
+        <li>服务器返回配置：
+          <ul>
+            <li>MQTT/WebSocket 地址</li>
+            <li>激活码（首次）</li>
+            <li>服务器时间</li>
+            <li>固件版本信息</li>
+          </ul>
+        </li>
+        <li>写入 NVS 持久化</li>
+        <li>显示激活码给用户</li>
+        <li>用户在 App 输入激活码</li>
+        <li>激活完成，进入 idle</li>
+      </ol>
+    </div>
+    <div>
+      <h3>⚡ 性能优化</h3>
+      <div class="card" style="border-color: #4ade80;">
+        <h3 style="color: #4ade80;">跳过版本检查（已实现）</h3>
+        <p>检测 NVS 已有 MQTT/WebSocket 配置时，直接跳过 OTA 版本检查循环，大幅加速启动。</p>
+      </div>
+      <div class="card" style="border-color: #f5a623; margin-top: 15px;">
+        <h3 style="color: #f5a623;">停用固件升级（已实现）</h3>
+        <p>注释掉 <code>UpgradeFirmware()</code> 调用，防止服务器远程推送固件升级，保留配置获取和激活功能。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 15: MCP 工具 -->
+<div class="slide feature-slide">
+  <h2>MCP 工具调用</h2>
+  <p>设备内置 MCP 服务器，AI 可通过 JSON-RPC 调用设备端工具：</p>
+  <div class="grid-3">
+    <div class="card" style="border-color: #e94560;">
+      <h3 style="color: #e94560;">📱 系统工具</h3>
+      <ul>
+        <li><code>self.get_device_status</code></li>
+        <li><code>self.reboot</code></li>
+      </ul>
+    </div>
+    <div class="card" style="border-color: #4ade80;">
+      <h3 style="color: #4ade80;">🔊 音频工具</h3>
+      <ul>
+        <li><code>audio.set_volume</code></li>
+        <li><code>audio.play_sound</code></li>
+      </ul>
+    </div>
+    <div class="card" style="border-color: #f5a623;">
+      <h3 style="color: #f5a623;">🖥️ 显示工具</h3>
+      <ul>
+        <li><code>screen.set_brightness</code></li>
+        <li><code>theme.set_theme</code></li>
+      </ul>
+    </div>
+  </div>
+  <div style="margin-top: 30px;">
+    <h3>🔄 调用流程</h3>
+    <div class="flow-diagram">
+      <div class="flow-step">用户说"重启"</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">AI 解析意图</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">发送 MCP 请求</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step" style="border-color: #4ade80;">设备执行 Reboot()</div>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 16: 技术亮点 -->
+<div class="slide content-slide">
+  <h2>技术亮点</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>🎨 LVGL 软件旋转</h3>
+      <p>不依赖硬件旋转，通过 <code>lv_draw_sw_rotate</code> 在 flush 回调中实时旋转帧缓冲区，支持任意角度。</p>
+    </div>
+    <div class="card">
+      <h3>🤸 IMU 姿态触发</h3>
+      <p>复用音频 I2C 总线连接 QMI8658，5Hz 采样，0.1g 阈值，无需额外 GPIO。</p>
+    </div>
+    <div class="card">
+      <h3>⚡ 快速启动</h3>
+      <p>NVS 配置缓存，跳过 OTA 版本检查，已激活设备秒级进入待机状态。</p>
+    </div>
+    <div class="card">
+      <h3>🔒 加密音频</h3>
+      <p>UDP 音频流使用 AES-CTR 加密，PSA 加密 API，防止音频被窃听。</p>
+    </div>
+    <div class="card">
+      <h3>🎭 双主题系统</h3>
+      <p>Light/Dark 主题完整切换，LVGL 事件冒泡实现双击切换，NVS 持久化。</p>
+    </div>
+    <div class="card">
+      <h3>🔋 电池集成</h3>
+      <p>ADC 分压采样，状态栏自动显示电量，低电量弹窗保护。</p>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 17: 项目数据统计 -->
+<div class="slide feature-slide">
+  <h2>项目数据统计</h2>
+  <div class="grid-3" style="max-width: 1200px;">
+    <div class="card stat">
+      <div class="num">9+</div>
+      <div class="label">已实现功能</div>
+    </div>
+    <div class="card stat">
+      <div class="num">2</div>
+      <div class="label">网络协议</div>
+    </div>
+    <div class="card stat">
+      <div class="num">2</div>
+      <div class="label">显示主题</div>
+    </div>
+    <div class="card stat">
+      <div class="num">3</div>
+      <div class="label">唤醒方式</div>
+    </div>
+    <div class="card stat">
+      <div class="num">0.1g</div>
+      <div class="label">IMU 灵敏度</div>
+    </div>
+    <div class="card stat">
+      <div class="num">270°</div>
+      <div class="label">屏幕旋转</div>
+    </div>
+  </div>
+  <div style="margin-top: 40px; text-align: center;">
+    <span class="badge badge-red">ESP32-S3</span>
+    <span class="badge badge-green">ESP-IDF v6.0.2</span>
+    <span class="badge badge-yellow">LVGL 9</span>
+    <span class="badge badge-blue">Opus 编码</span>
+    <span class="badge badge-red">MQTT</span>
+    <span class="badge badge-green">WebSocket</span>
+    <span class="badge badge-yellow">AES-CTR</span>
+    <span class="badge badge-blue">QMI8658</span>
+  </div>
+</div>
+
+<!-- Slide 18: 未来展望 -->
+<div class="slide content-slide">
+  <h2>未来展望</h2>
+  <div class="grid">
+    <div class="card" style="border-color: #4ade80;">
+      <h3 style="color: #4ade80;">📦 SD 卡存储</h3>
+      <p>移植原厂 demo 的 SD 卡功能，用于离线语音提示音、对话日志、配置备份。</p>
+    </div>
+    <div class="card" style="border-color: #f5a623;">
+      <h3 style="color: #f5a623;">⏰ RTC 时钟</h3>
+      <p>集成 PCF85063 RTC 芯片，断电保持时间，开机快速同步系统时间。</p>
+    </div>
+    <div class="card" style="border-color: #60a5fa;">
+      <h3 style="color: #60a5fa;">💤 深度睡眠</h3>
+      <p>电量低自动进入深度睡眠，延长电池寿命；物理按钮唤醒。</p>
+    </div>
+    <div class="card" style="border-color: #e94560;">
+      <h3 style="color: #e94560;">⚙️ UI 设置菜单</h3>
+      <p>触摸屏设置界面：重启、休眠、音量、主题、唤醒词灵敏度等。</p>
+    </div>
+    <div class="card" style="border-color: #a78bfa;">
+      <h3 style="color: #a78bfa;">🎤 AFE 模式</h3>
+      <p>切换到 AFE WakeNet，支持打断 AI 回复（需放弃自定义唤醒词）。</p>
+    </div>
+    <div class="card" style="border-color: #fb7185;">
+      <h3 style="color: #fb7185;">🌡️ 温控保护</h3>
+      <p>读取芯片温度，过高自动降频或重启，保护硬件。</p>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 19: 结束页 -->
+<div class="slide end-slide">
+  <div class="title-icon">🎉</div>
+  <h1>谢谢</h1>
+  <p class="subtitle">XiaoZhi 语音助手项目</p>
+  <p class="subtitle" style="margin-top: 40px;">基于 ESP32-S3-Touch-LCD-3.49 v2</p>
+  <p class="subtitle" style="margin-top: 20px; color: #888;">ESP-IDF v6.0.2 · LVGL 9 · MQTT · Opus</p>
+</div>
+
+<!-- Navigation -->
+<div class="nav-controls">
+  <button class="nav-btn" onclick="prevSlide()">←</button>
+  <button class="nav-btn" onclick="nextSlide()">→</button>
+</div>
+<div class="slide-counter" id="counter">1 / 19</div>
+
+<script>
+let currentSlide = 0;
+const slides = document.querySelectorAll('.slide');
+const totalSlides = slides.length;
+const counter = document.getElementById('counter');
+
+function showSlide(index) {
+  slides.forEach((slide, i) => {
+    slide.classList.remove('active', 'prev');
+    if (i === index) {
+      slide.classList.add('active');
+    } else if (i < index) {
+      slide.classList.add('prev');
+    }
+  });
+  counter.textContent = `${index + 1} / ${totalSlides}`;
+}
+
+function nextSlide() {
+  if (currentSlide < totalSlides - 1) {
+    currentSlide++;
+    showSlide(currentSlide);
+  }
+}
+
+function prevSlide() {
+  if (currentSlide > 0) {
+    currentSlide--;
+    showSlide(currentSlide);
+  }
+}
+
+// 键盘控制
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') {
+    nextSlide();
+  } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+    prevSlide();
+  } else if (e.key === 'Home') {
+    currentSlide = 0;
+    showSlide(currentSlide);
+  } else if (e.key === 'End') {
+    currentSlide = totalSlides - 1;
+    showSlide(currentSlide);
+  }
+});
+
+// 触摸滑动
+let touchStartX = 0;
+document.addEventListener('touchstart', (e) => {
+  touchStartX = e.touches[0].clientX;
+});
+document.addEventListener('touchend', (e) => {
+  const touchEndX = e.changedTouches[0].clientX;
+  const diff = touchStartX - touchEndX;
+  if (Math.abs(diff) > 50) {
+    if (diff > 0) {
+      nextSlide();
+    } else {
+      prevSlide();
+    }
+  }
+});
+</script>
+</body>
+</html>

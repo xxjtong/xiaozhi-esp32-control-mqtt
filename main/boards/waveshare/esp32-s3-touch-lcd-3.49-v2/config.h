@@ -1,0 +1,70 @@
+#ifndef _BOARD_CONFIG_H_
+#define _BOARD_CONFIG_H_
+
+#include <driver/gpio.h>
+#include <driver/spi_master.h>
+#include "lvgl.h"
+
+#define AUDIO_INPUT_SAMPLE_RATE 24000
+#define AUDIO_OUTPUT_SAMPLE_RATE 24000
+
+#define AUDIO_INPUT_REFERENCE    true
+
+#define AUDIO_I2S_GPIO_MCLK  GPIO_NUM_7
+#define AUDIO_I2S_GPIO_WS    GPIO_NUM_46
+#define AUDIO_I2S_GPIO_BCLK  GPIO_NUM_15
+#define AUDIO_I2S_GPIO_DIN   GPIO_NUM_6
+#define AUDIO_I2S_GPIO_DOUT  GPIO_NUM_45
+
+#define AUDIO_CODEC_PA_PIN       GPIO_NUM_NC
+#define AUDIO_CODEC_I2C_SDA_PIN  GPIO_NUM_47
+#define AUDIO_CODEC_I2C_SCL_PIN  GPIO_NUM_48
+#define AUDIO_CODEC_ES8311_ADDR  ES8311_CODEC_DEFAULT_ADDR
+#define AUDIO_CODEC_ES7210_ADDR  ES7210_CODEC_DEFAULT_ADDR
+
+#define I2C_Touch_ADDRESS       0x3b
+#define I2C_Touch_SDA_PIN       GPIO_NUM_17
+#define I2C_Touch_SCL_PIN       GPIO_NUM_18
+
+#define BOOT_BUTTON_GPIO        GPIO_NUM_0
+#define PWR_BUTTON_GPIO         GPIO_NUM_16
+
+#define LCD_CS       GPIO_NUM_9
+#define LCD_PCLK     GPIO_NUM_10
+#define LCD_D0       GPIO_NUM_11
+#define LCD_D1       GPIO_NUM_12
+#define LCD_D2       GPIO_NUM_13
+#define LCD_D3       GPIO_NUM_14
+#define LCD_RST      GPIO_NUM_NC
+#define LCD_LIGHT    (-1)
+
+#define DISPLAY_WIDTH  172
+#define DISPLAY_HEIGHT 640
+#define LVGL_DMA_BUFF_LEN (DISPLAY_WIDTH * 64 * 2)
+#define LVGL_SPIRAM_BUFF_LEN (DISPLAY_WIDTH * DISPLAY_HEIGHT * 2)
+
+#define DISPLAY_ROTATION_90 true
+
+#define DISPLAY_MIRROR_X false
+#define DISPLAY_MIRROR_Y false
+#define DISPLAY_SWAP_XY  false
+
+#define DISPLAY_OFFSET_X  0
+#define DISPLAY_OFFSET_Y  0
+
+
+#define DISPLAY_BACKLIGHT_PIN   GPIO_NUM_42
+#define DISPLAY_BACKLIGHT_OUTPUT_INVERT true
+
+// Battery ADC (ADC1_CH3 = GPIO4, 分压比 3:1)
+#define BATTERY_ADC_UNIT      ADC_UNIT_1
+#define BATTERY_ADC_CHANNEL    ADC_CHANNEL_3
+#define BATTERY_ADC_UPPER_RESISTOR  200000.0f  // 200kΩ
+#define BATTERY_ADC_LOWER_RESISTOR  100000.0f  // 100kΩ
+
+// RTC（PCF85063）时区偏移：SNTP 返回 UTC，而项目约定系统时间存本地墙钟，
+// 故换算时需叠加该偏移。中国标准时间 UTC+8。
+#define RTC_TIMEZONE_OFFSET_SEC  (8 * 3600)
+
+
+#endif // _BOARD_CONFIG_H_
