@@ -864,11 +864,22 @@ void LcdDisplay::SetupUI() {
     lv_obj_center(emoji_image_);
     lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
 
-    /* Middle layer: preview_image_ - centered display */
-    preview_image_ = lv_image_create(screen);
-    lv_obj_set_size(preview_image_, width_ / 2, height_ / 2);
-    lv_obj_align(preview_image_, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
+    /* Middle layer: preview_image_ - scrollable viewport (vertical drag), picture centered */
+    // Must use the visible resolution (LV_HOR_RES/LV_VER_RES, already rotated) instead of
+    // width_/height_ (the panel's native orientation).
+    preview_viewport_ = lv_obj_create(screen);
+    lv_obj_set_size(preview_viewport_, LV_HOR_RES, LV_VER_RES);
+    lv_obj_align(preview_viewport_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_opa(preview_viewport_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(preview_viewport_, 0, 0);
+    lv_obj_set_style_radius(preview_viewport_, 0, 0);
+    lv_obj_set_style_pad_all(preview_viewport_, 0, 0);
+    lv_obj_set_scroll_dir(preview_viewport_, LV_DIR_VER);  // Only vertical dragging
+    lv_obj_set_scrollbar_mode(preview_viewport_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_flag(preview_viewport_, LV_OBJ_FLAG_HIDDEN);
+
+    preview_image_ = lv_image_create(preview_viewport_);
+    lv_image_set_inner_align(preview_image_, LV_IMAGE_ALIGN_CENTER);
 
     /* Layer 1: Top bar - for status icons */
     top_bar_ = lv_obj_create(screen);
@@ -1017,7 +1028,7 @@ void LcdDisplay::SetupUI() {
 
 void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     DisplayLockGuard lock(this);
-    if (preview_image_ == nullptr) {
+    if (preview_image_ == nullptr || preview_viewport_ == nullptr) {
         ESP_LOGE(TAG, "Preview image is not initialized");
         return;
     }
@@ -1025,7 +1036,7 @@ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     if (image == nullptr) {
         esp_timer_stop(preview_timer_);
         lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(preview_viewport_, LV_OBJ_FLAG_HIDDEN);
         preview_image_cached_.reset();
         if (gif_controller_) {
             gif_controller_->Start();
@@ -1037,8 +1048,21 @@ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     auto img_dsc = preview_image_cached_->image_dsc();
     lv_image_set_src(preview_image_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
-        // zoom factor 0.5
-        lv_image_set_scale(preview_image_, 128 * width_ / img_dsc->header.w);
+        // Scale by width: the picture always occupies 80% of the screen width, and the
+        // height follows the aspect ratio. Taller-than-screen pictures can be dragged
+        // vertically inside preview_viewport_.
+        // LVGL scale unit is 1/256, so 256 == 100%.
+        int32_t target_width = LV_HOR_RES * 8 / 10;
+        int32_t scale = target_width * 256 / img_dsc->header.w;
+        int32_t scaled_width = img_dsc->header.w * scale / 256;
+        int32_t scaled_height = img_dsc->header.h * scale / 256;
+        lv_image_set_scale(preview_image_, scale);
+        lv_obj_set_size(preview_image_, scaled_width, scaled_height);
+        // Center short pictures; start from the top for pictures taller than the screen.
+        lv_coord_t offset_y =
+            (scaled_height < LV_VER_RES) ? (LV_VER_RES - scaled_height) / 2 : 0;
+        lv_obj_align(preview_image_, LV_ALIGN_TOP_MID, 0, offset_y);
+        lv_obj_scroll_to_y(preview_viewport_, 0, LV_ANIM_OFF);
     }
 
     // Hide emoji_box_
@@ -1046,7 +1070,7 @@ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
         gif_controller_->Stop();
     }
     lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(preview_viewport_, LV_OBJ_FLAG_HIDDEN);
     esp_timer_stop(preview_timer_);
     ESP_ERROR_CHECK(esp_timer_start_once(preview_timer_, PREVIEW_IMAGE_DURATION_MS * 1000));
 }
@@ -1096,6 +1120,15 @@ void LcdDisplay::ClearChatMessages() {
     }
 }
 #endif
+
+void LcdDisplay::CancelPreviewTimeout() {
+    DisplayLockGuard lock(this);
+    if (preview_timer_ != nullptr) {
+        // Keep the current preview on screen instead of auto-hiding after
+        // PREVIEW_IMAGE_DURATION_MS.
+        esp_timer_stop(preview_timer_);
+    }
+}
 
 void LcdDisplay::SetEmotion(const char* emotion) {
     if (!setup_ui_called_) {

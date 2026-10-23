@@ -84,6 +84,12 @@ public:
     void Schedule(std::function<void()>&& callback);
 
     /**
+     * Report a local user action (button, touch gesture, motion, wake word) to the
+     * control MQTT broker. Best effort: dropped while the broker is offline.
+     */
+    void ReportUserEvent(const std::string& event, const std::string& value = "");
+
+    /**
      * Alert with status, message, emotion and optional sound
      */
     void Alert(const char* status, const char* message, const char* emotion = "", const std::string_view& sound = "");

@@ -126,6 +126,7 @@ private:
                 ESP_LOGI(TAG, "Motion detected: mag=%.2fg, delta=%.2fg → StartListening",
                          mag, delta);
                 last_trigger_us_ = now;
+                app.ReportUserEvent("motion_detected");
                 app.Schedule([]() {
                     Application::GetInstance().ToggleChatState();
                 });

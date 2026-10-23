@@ -30,6 +30,10 @@ public:
     // Broadcast device state change to the control broker (optional session_update mirror).
     void BroadcastState(const std::string& state_name);
 
+    // Broadcast a local user action (best effort, QoS 0). Empty value is omitted.
+    void BroadcastEvent(const std::string& event, const std::string& value,
+                        const std::string& state);
+
     // Returns true if a control broker is configured in NVS.
     bool IsConfigured() const { return !subscribe_topic_.empty(); }
 
@@ -56,6 +60,8 @@ private:
     std::atomic<bool> connected_{false};
     std::atomic<bool> enabled_{false};
     std::atomic<bool> connect_task_running_{false};
+    // Only one image download/decode at a time: each one can hold megabytes of PSRAM.
+    std::atomic<bool> image_fetch_running_{false};
     std::mutex lifecycle_mutex_;
     std::shared_ptr<std::atomic<bool>> alive_;
 
@@ -67,6 +73,9 @@ private:
     std::string subscribe_topic_;  // "xiaozhi/{device_id}/cmd"
     std::string reply_topic_;      // "xiaozhi/{device_id}/reply"
     std::string device_id_;
+
+    // Monotonic sequence for user-action events (main task only).
+    uint32_t event_seq_ = 0;
 
     // --- Message dispatch ---
     void OnMessage(const std::string& topic, const std::string& payload);
@@ -87,7 +96,6 @@ private:
     void HandleSetStatus(cJSON* root);
     void HandleTogglePowerSave(cJSON* root);
     void HandleQueryStatus(cJSON* root);
-    void HandlePlaySound(cJSON* root);
 
     // Image download runs off the main task; the decoded image is applied on it.
     static void ImageFetchTaskEntry(void* arg);

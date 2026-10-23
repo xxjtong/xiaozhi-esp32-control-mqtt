@@ -35,6 +35,8 @@ public:
     virtual ~Display();
 
     virtual void SetStatus(const char* status);
+    // Overrides the status text color (0xRRGGBB). The next SetStatus() restores the theme color.
+    virtual void SetStatusColor(uint32_t rgb);
     virtual void ShowNotification(const char* notification, int duration_ms = 3000);
     virtual void ShowNotification(const std::string& notification, int duration_ms = 3000);
     virtual void SetEmotion(const char* emotion);

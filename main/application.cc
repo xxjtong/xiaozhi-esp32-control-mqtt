@@ -93,6 +93,11 @@ void Application::Initialize() {
     // Add state change listeners
     state_machine_.AddStateChangeListener([this](DeviceState old_state, DeviceState new_state) {
         xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
+        // One user<->assistant exchange: every entry into Speaking (wake greeting or a
+        // later turn). Counting these events gives the interaction count without VAD.
+        if (new_state == kDeviceStateSpeaking && old_state != kDeviceStateSpeaking) {
+            ReportUserEvent("interaction");
+        }
     });
 
     // Start the clock timer to update the status bar
@@ -903,6 +908,7 @@ void Application::HandleWakeWordDetectedEvent() {
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
+    ReportUserEvent("wake_word");
 
     if (state == kDeviceStateIdle) {
         BeginWakeWordInvoke(wake_word);
@@ -1170,6 +1176,19 @@ void Application::Schedule(std::function<void()>&& callback) {
         main_tasks_.push_back(std::move(callback));
     }
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
+}
+
+void Application::ReportUserEvent(const std::string& event, const std::string& value) {
+    if (control_mqtt_ == nullptr) {
+        return;
+    }
+    // Capture the state as it is when the user acts, not when the task finally runs.
+    std::string state = DeviceStateToString(GetDeviceState());
+    Schedule([this, event, value, state]() {
+        if (control_mqtt_ != nullptr) {
+            control_mqtt_->BroadcastEvent(event, value, state);
+        }
+    });
 }
 
 void Application::AbortSpeaking(AbortReason reason) {

@@ -22,9 +22,13 @@ public:
     virtual ~LvglDisplay();
 
     virtual void SetStatus(const char* status);
+    virtual void SetStatusColor(uint32_t rgb) override;
     virtual void ShowNotification(const char* notification, int duration_ms = 3000);
     virtual void ShowNotification(const std::string& notification, int duration_ms = 3000);
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image);
+    // Stop any auto-hide timer so the currently shown preview stays on screen.
+    // Displays without such a timer can keep the default no-op.
+    virtual void CancelPreviewTimeout();
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
     virtual bool SnapshotToJpeg(std::string& jpeg_data, int quality = 80);

@@ -198,6 +198,12 @@ void CustomLcdDisplay::SetupUI() {
     lv_obj_add_event_cb(container_, OnChildCreatedEvent, LV_EVENT_CHILD_CREATED, nullptr);
 
     lv_obj_add_event_cb(container_, OnScreenClickEvent, LV_EVENT_SHORT_CLICKED, this);
+
+    // 预览图容器铺满屏幕（为了支持上下拖动），它会吞掉落在图片区域上的点击，
+    // 事件也不会冒泡到 container_，所以这里单独挂一份双击判定。
+    if (preview_viewport_ != nullptr) {
+        lv_obj_add_event_cb(preview_viewport_, OnScreenClickEvent, LV_EVENT_SHORT_CLICKED, this);
+    }
     ESP_LOGI(TAG, "Theme switch on double-click enabled");
 }
 
@@ -224,6 +230,14 @@ void CustomLcdDisplay::ToggleTheme() {
     Theme* current = GetTheme();
     if (current == nullptr) return;
 
+    // 远程下发的图片会常驻屏幕并挡住界面，双击时顺手清掉，恢复正常 UI。
+    // （LcdDisplay::SetTheme() 只改样式，不会重建对象树，所以图片不会自己消失）
+    if (preview_image_cached_ != nullptr) {
+        ESP_LOGI(TAG, "Clearing persistent preview image on double-click");
+        SetPreviewImage(nullptr);
+        Application::GetInstance().ReportUserEvent("image_cleared", "double_click");
+    }
+
     std::string current_name = current->name();
     std::string next_name = (current_name == "light") ? "dark" : "light";
 
@@ -232,6 +246,7 @@ void CustomLcdDisplay::ToggleTheme() {
 
     ESP_LOGI(TAG, "Switching theme: %s -> %s", current_name.c_str(), next_name.c_str());
     SetTheme(next_theme);
+    Application::GetInstance().ReportUserEvent("theme_changed", next_name);
 }
 
 // 空闲/开机时用公司 logo 顶替默认的机器人图标。
