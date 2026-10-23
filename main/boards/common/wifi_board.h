@@ -54,6 +54,9 @@ public:
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override;
     virtual AudioCodec* GetAudioCodec() override { return nullptr; }
     virtual std::string GetDeviceStatusJson() override;
+    virtual std::string GetIpAddress() override;
+    virtual std::string GetWifiSsid() override;
+    virtual int GetWifiRssi() override;
     
     /**
      * Enter WiFi configuration mode (thread-safe, can be called from any task)

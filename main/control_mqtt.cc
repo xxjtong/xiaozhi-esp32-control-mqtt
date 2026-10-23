@@ -275,6 +275,10 @@ void ControlMqtt::SendHello() {
     cJSON_AddStringToObject(root, "device_id", device_id_.c_str());
     cJSON_AddStringToObject(root, "status", state);
     cJSON_AddStringToObject(root, "version", version);
+    std::string ip = Board::GetInstance().GetIpAddress();
+    if (!ip.empty()) {
+        cJSON_AddStringToObject(root, "ip", ip.c_str());
+    }
     PublishJson(reply_topic_, root);  // Broadcast on reply topic (hello is a status msg)
     cJSON_Delete(root);
     ESP_LOGI(TAG, "hello sent");
@@ -1076,6 +1080,20 @@ void ControlMqtt::HandleQueryStatus(cJSON* root) {
     float temp = 0;
     if (board.GetTemperature(temp)) {
         cJSON_AddNumberToObject(extra, "temperature", temp);
+    }
+
+    // Local network info, when the board can provide it (empty for cellular boards).
+    std::string ip = board.GetIpAddress();
+    if (!ip.empty()) {
+        cJSON_AddStringToObject(extra, "ip", ip.c_str());
+    }
+    std::string ssid = board.GetWifiSsid();
+    if (!ssid.empty()) {
+        cJSON_AddStringToObject(extra, "ssid", ssid.c_str());
+    }
+    int rssi = board.GetWifiRssi();
+    if (rssi != 0) {
+        cJSON_AddNumberToObject(extra, "rssi", rssi);
     }
 
     cJSON_AddBoolToObject(extra, "mqtt_connected", connected_);

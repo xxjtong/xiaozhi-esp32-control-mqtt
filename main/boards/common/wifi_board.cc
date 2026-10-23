@@ -279,6 +279,12 @@ std::string WifiBoard::GetBoardJson() {
     return json;
 }
 
+std::string WifiBoard::GetIpAddress() { return WifiManager::GetInstance().GetIpAddress(); }
+
+std::string WifiBoard::GetWifiSsid() { return WifiManager::GetInstance().GetSsid(); }
+
+int WifiBoard::GetWifiRssi() { return WifiManager::GetInstance().GetRssi(); }
+
 void WifiBoard::SetPowerSaveLevel(PowerSaveLevel level) {
     WifiPowerSaveLevel wifi_level;
     switch (level) {

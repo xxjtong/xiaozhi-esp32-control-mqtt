@@ -91,7 +91,7 @@
 
 | type | 触发时机 | 字段 |
 |---|---|---|
-| `hello` | 连接成功（含重连） | `device_id`、`status`（当前设备状态）、`version`（固件版本，取自 `esp_app_get_description`） |
+| `hello` | 连接成功（含重连） | `device_id`、`status`（当前设备状态）、`version`（固件版本，取自 `esp_app_get_description`）、`ip`（可选，内网地址） |
 | `goodbye` | 主动释放连接前 | `device_id` |
 | `session_update` | 设备状态变化 | `device_id`、`status` |
 | `reply` | 每条指令处理完 | `command_type`、`success`、`device_state`、`extra`（可选） |
@@ -113,7 +113,7 @@
 | `notify` | `audio_url`、`subtitles[]` | Idle | 远程播报（复用通知播放器） |
 | `set_status` | `text`、可选 `color` | 需显示 | 状态栏文本；`color` 支持颜色名（`red`/`green`/`blue`/`yellow`/`orange`/`white`/`black`/`cyan`/`purple`/`gray`）或 `#RRGGBB` |
 | `toggle_power_save` | `enable`: bool | Idle | 低功耗 / 性能模式 |
-| `query_status` | — | 任意 | `extra` 返回 `device_state`、`battery`、`charging`、`temperature`、`mqtt_connected` |
+| `query_status` | — | 任意 | `extra` 返回 `device_state`、`battery`、`charging`、`temperature`、`ip`、`ssid`、`rssi`、`mqtt_connected` |
 
 状态不满足时返回 `success=false`，不会静默吞掉指令。
 
@@ -139,6 +139,9 @@
     "battery": 87,
     "charging": false,
     "temperature": 41.5,
+    "ip": "192.168.6.55",
+    "ssid": "Temi",
+    "rssi": -59,
     "mqtt_connected": true
   }
 }
@@ -361,6 +364,13 @@ abort (idle)     -> success=false       （此前误报成功）
 - 覆盖唤醒后的首次回应和后续每一轮问答；统计 `interaction` 条数即为交互次数
 - 事件由 `ReportUserEvent()` 统一排队到主任务发布，QoS 0，离线丢弃
 - 未引入额外定时器或音频侧改动，VAD 逻辑保持原样（仅用于 LED/自动停止等原有功能）
+
+### 阶段十一：网络信息上报
+
+- `Board` 新增可选接口 `GetIpAddress()` / `GetWifiSsid()` / `GetWifiRssi()`，默认返回空值
+- `WifiBoard` 从 `WifiManager` 取值；`EthernetBoard` 返回缓存的 IP；`DualNetworkBoard` 委托当前板卡
+- `hello` 增加 `ip`；`query_status` 的 `extra` 增加 `ip`、`ssid`、`rssi`（有值时才带）
+- 蜂窝板型（ML307/ NT26 等）无对应数据时自动省略，不影响旧字段
 
 ## 8. 构建与验证
 
