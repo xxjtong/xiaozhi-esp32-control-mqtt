@@ -326,11 +326,16 @@ void LvglDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {}
 
 void LvglDisplay::CancelPreviewTimeout() {}
 
-void LvglDisplay::SetBackgroundImage(std::unique_ptr<LvglImage> image) {
+bool LvglDisplay::SetBackgroundImage(std::unique_ptr<LvglImage> image) {
     (void)image;
+    return false;
 }
 
 void LvglDisplay::ClearBackgroundImage() {}
+
+bool LvglDisplay::HasPreviewImage() { return false; }
+
+bool LvglDisplay::HasBackgroundImage() { return false; }
 
 void LvglDisplay::SetPowerSaveMode(bool on) {
     if (on) {

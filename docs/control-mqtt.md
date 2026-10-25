@@ -105,15 +105,16 @@
 | `abort` | `reason`: 可选 `wake_word_detected` | Connecting / Listening / Speaking | 打断当前回合；不可用时回 `success=false` |
 | `mcp` | `payload`: JSON object | Idle | 透传给 MCP 管道 |
 | `system` | `command`: `reboot` | 任意 | 先发回复再重启 |
-| `set_image` | `url`，或 `clear: true` 清除，可选 `mode` | 需 LVGL 显示 | 下载图片并显示（文件 ≤4MB，分辨率 ≤1280×1280 且 ≤1MP），支持 JPEG / PNG。`mode` 可选：`preview`（默认，浮层居中显示，可拖动，双击清除）或 `background`（设为桌面壁纸，cover 居中裁剪铺满全屏，跨主题切换保留，双击不清）。`clear` 同时清除预览与壁纸。服务端规格建议见 6.3 |
-| `set_theme` | `theme`: `light` / `dark` | 需带主题的显示 | 与双击屏幕切换走同一条路径（`LvglThemeManager`） |
+| `set_image` | `url`，或 `clear: true` 清除，可选 `mode` | 需 LVGL 显示 | 下载图片并显示（文件 ≤4MB，分辨率 ≤1280×1280 且 ≤1MP），支持 JPEG / PNG。`mode` 可选：`preview`（默认，浮层居中显示，可拖动，双击清除）或 `background`（桌面壁纸，cover 居中裁剪铺满全屏，跨主题切换保留；JPEG 直接用 RGB565，PNG 在显示层解码为 RGB565）。`clear` 同时清除预览与壁纸。服务端规格建议见 6.3 |
+| `set_theme` | `theme`: `light` / `dark` | 需带主题的显示 | 与三击屏幕切换走同一条路径（`LvglThemeManager`） |
 | `set_volume` | `level`: 0–100 | 需音频 Codec | 写入 NVS 持久化 |
 | `set_brightness` | `level`: 0–100 | 需 Backlight | 持久化到 NVS |
 | `toggle_wake_word` | `enable`: bool | Idle | 开关唤醒词检测 |
 | `notify` | `audio_url`、`subtitles[]` | Idle | 远程播报（复用通知播放器） |
 | `set_status` | `text`、可选 `color` | 需显示 | 状态栏文本；`color` 支持颜色名（`red`/`green`/`blue`/`yellow`/`orange`/`white`/`black`/`cyan`/`purple`/`gray`）或 `#RRGGBB` |
 | `toggle_power_save` | `enable`: bool | Idle | 低功耗 / 性能模式 |
-| `query_status` | — | 任意 | `extra` 返回 `device_state`、`battery`、`charging`、`temperature`、`ip`、`ssid`、`rssi`、`mqtt_connected` |
+| `set_imu` | `enable`: bool | 任意 | 开关 IMU 运动检测，持久化到 NVS `imu/enabled`；无 IMU 板型回 `success=false` |
+| `query_status` | — | 任意 | `extra` 返回 `device_state`、`battery`、`charging`、`temperature`、`ip`、`ssid`、`rssi`、`theme`、`volume`、`brightness`、`preview_active`、`wallpaper_active`、`imu_enabled`、`wake_word_running`、`mqtt_connected`（有值才带） |
 
 状态不满足时返回 `success=false`，不会静默吞掉指令。
 
@@ -142,6 +143,13 @@
     "ip": "192.168.6.55",
     "ssid": "Temi",
     "rssi": -59,
+    "theme": "light",
+    "volume": 70,
+    "brightness": 80,
+    "preview_active": false,
+    "wallpaper_active": false,
+    "imu_enabled": true,
+    "wake_word_running": true,
     "mqtt_connected": true
   }
 }
@@ -157,8 +165,8 @@
 | `interaction` | — | 进入 Speaking 状态，即一次"用户提问 → 设备回答"的交互 |
 | `button_click` | `boot` | BOOT 键短按（开始/结束对话、配网入口） |
 | `motion_detected` | — | QMI8658 姿态变化触发（仅 Idle，5 秒冷却） |
-| `image_cleared` | `double_click` | 双击清除常驻图片 |
-| `theme_changed` | `light` / `dark` | 双击切换主题 |
+| `image_cleared` | `double_click` | 双击清除常驻预览图 |
+| `theme_changed` | `light` / `dark` | 三击切换主题 |
 
 示例：
 
@@ -207,8 +215,15 @@
 `{"type":"set_image","clear":true}` 通过 `SetPreviewImage(nullptr)` 恢复默认 UI。
 
 注意 `LcdDisplay::SetTheme()` 只改样式、不重建对象树，所以切主题不会清掉图片。
-本板型的双击手势在 `CustomLcdDisplay::ToggleTheme()` 里补了一步：若存在常驻图片先 `SetPreviewImage(nullptr)`，
-这样「双击切主题」同时把被图片挡住的界面恢复回来。
+本板型手势：**双击清预览图，三击切主题**；`CustomLcdDisplay::ClearPreviewImage()` 只在存在
+常驻预览图时清图并上报 `image_cleared`，`ToggleTheme()` 不再顺带清图。
+双击后等待 500ms 确认不是三击才清图；三击会取消待执行的双击并只切主题，因此
+“三击”不会顺带清掉图片。壁纸不受双击影响，仍由 `{"type":"set_image","clear":true}` 清除。
+`mode=background` 对两种格式都走 `CreateCoverBackground()` 转成 RGB565：JPEG 已由
+`jpeg_to_image()` 解好；PNG 则在显示层调用 LVGL lodepng 解为 ARGB8888 后再转 RGB565
+（透明像素叠黑底），然后做 cover 裁剪。解码失败、格式不支持或 PSRAM 不足时回
+`success=false, extra.error="failed to apply background image"`，不再出现“回成功但屏幕没变”。
+PNG 多占一份解码缓冲，1MP 级 PNG 的峰值内存较高，建议壁纸仍控制在 512px 左右。
 
 缓冲区所有权：JPEG 源数据解码后立即释放，解码结果交给 `LvglAllocatedImage` 析构释放；
 构造抛异常、无显示设备、对象已销毁等分支自行 `heap_caps_free()`。
@@ -239,7 +254,7 @@
 ### 6.4 其他细节
 
 - 显示能力视为可选：`set_image` / `set_status` / `set_theme` 都先判空 `Board::GetInstance().GetDisplay()`
-- `set_theme` 复用 `LvglThemeManager`（与双击屏幕切换、MCP 的 `self.screen.set_theme` 同一路径），支持 `light` / `dark`
+- `set_theme` 复用 `LvglThemeManager`（与三击屏幕切换、MCP 的 `self.screen.set_theme` 同一路径），支持 `light` / `dark`
 - 设备状态字符串统一由 `DeviceStateToString()` 提供，避免多处重复 switch
 - `cJSON_PrintUnformatted()` 的释放一律用 `cJSON_free()`
 - `SendReply()` 在未连接时提前返回，同时释放调用方传入的 `extra`，避免泄漏
@@ -308,7 +323,7 @@
 | 发现的问题 | 处理 |
 |---|---|
 | `play_sound` 把名字当 OGG 字节传给 `PlaySound()`，永远无声 | 上游无「按名字播音效」的能力，删除该指令 |
-| `set_theme` 空实现 | 改用 `LvglThemeManager` 查找主题后 `display->SetTheme()`，与双击屏幕/MCP 同一路径 |
+| `set_theme` 空实现 | 改用 `LvglThemeManager` 查找主题后 `display->SetTheme()`，与桌面手势/MCP 同一路径 |
 | `set_image` 收 JPEG 必失败 | 构建未开 `LV_USE_TJPGD`；改为在下载任务里调用项目自带 `jpeg_to_image()` 解成 RGB565 再交给 LVGL |
 | `listen stop` 在 listening 时被拒 | 拆分守卫：`stop` 放开到任意状态，`start` 仍限制 Idle/Notifying |
 | `abort` 无条件回 `success=true` | 仅在 Connecting/Listening/Speaking 回成功，其余回失败 |
@@ -316,7 +331,7 @@
 | 并发 `set_image` 可能同时占满 PSRAM | 增加 `image_fetch_running_` 单飞保护；注意 `vTaskDelete()` 不会执行栈上析构，标志必须在退出前显式清除 |
 | 图片 5 秒后自动消失 | 新增 `LvglDisplay::CancelPreviewTimeout()`，应用远程图片后停掉预览定时器；另支持 `clear:true` 恢复 UI |
 
-实测结果（编译产物 `0x2ec3e0`，分区余量 26%）：
+实测结果（阶段六历史编译产物 `0x2ec3e0`，当时分区余量 26%）：
 
 ```
 set_theme dark   -> success=true
@@ -338,7 +353,7 @@ abort (idle)     -> success=false       （此前误报成功）
 |---|---|
 | 图片居中缩小、很小，右侧有滚动条、屏幕可上下拖拽 | 预览控件误用面板原始分辨率 `width_/height_`（172×640），改为旋转后的 `LV_HOR_RES/LV_VER_RES`（640×172） |
 | 需要按比例显示并允许浏览长图 | 预览图放入全屏透明容器，按屏宽 80%（512 px）等比缩放；容器只允许垂直滚动、滚动条关闭 |
-| 预览容器会吞掉双击事件 | 在 `CustomLcdDisplay::SetupUI()` 里给容器单独注册双击判定，保持「双击清图 + 切主题」 |
+| 预览容器会吞掉点击事件 | 在 `CustomLcdDisplay::SetupUI()` 里给容器单独注册点击判定，保持「双击清图、三击切主题」 |
 | 超大图片可能耗尽 PSRAM | 下载后先按文件头预检尺寸（JPEG SOF / PNG IHDR），主任务解码后再兜底；超过 1280×1280 或 100 万像素回 `extra.error="image too large (max 1280x1280, 1 MP)"` |
 
 服务端（第三方平台）无法改代码，改为在文档 6.3 给出图片规格建议（512 宽、≤1MB、≤30 万像素）。
@@ -353,7 +368,7 @@ abort (idle)     -> success=false       （此前误报成功）
 ### 阶段九：本地用户行为上报
 
 - 新增 `ControlMqtt::BroadcastEvent()` 与 `Application::ReportUserEvent()`，向 `reply_topic` 发布 `type:"event"`
-- 接入点：语音唤醒、BOOT 短按、IMU 姿态变化、双击清图、双击切主题
+- 接入点：语音唤醒、BOOT 短按、IMU 姿态变化、双击清图、三击切主题
 - 所有调用都经 `Application::Schedule()` 回到主任务，避免在按键/IMU/LVGL 任务里直接访问 MQTT
 - 事件为 QoS 0 尽力而为，离线丢弃；携带 `seq`、`uptime_ms`、`state` 便于对账，不含文本/语音内容
 
@@ -377,8 +392,30 @@ abort (idle)     -> success=false       （此前误报成功）
 - `set_image` 增加可选 `mode` 字段：`preview`（默认，原浮层行为）/ `background`（桌面壁纸）
 - 壁纸复用项目原有主题背景图机制：`LvglTheme::set_background_image()` 把图装到 light/dark 两个主题上，`SetTheme()` 时由 `lv_obj_set_style_bg_image_src(container_, ...)` 绘制到全屏背景层，UI 元素自然浮在其上
 - 新增 `LcdDisplay::CreateCoverBackground()`：最近邻 cover 缩放（按短边铺满、居中裁剪）到 `LV_HOR_RES × LV_VER_RES` 的 RGB565 缓冲，存 PSRAM
-- 壁纸跨明暗主题切换保留（同时注册到两个主题）；双击屏幕只切主题不清壁纸；清壁纸走 `{"type":"set_image","clear":true}`
+- 壁纸跨明暗主题切换保留（同时注册到两个主题）；双击只清预览图、不清壁纸；清壁纸走 `{"type":"set_image","clear":true}`
 - 当前为会话级（运行时内存），断电重启后恢复纯色背景；如需持久化可后续存到 SPIFFS
+
+### 阶段十三：手势/诊断/壁纸健壮性
+
+- 手势改为「双击清预览图、三击切主题」：`CustomLcdDisplay` 自行累计 `LV_EVENT_SHORT_CLICKED` 次数（500ms 窗口），第 2 次启动 500ms 定时器，窗口到期才清图并上报 `image_cleared`；第 3 次取消定时器、切主题并上报 `theme_changed`，因此三击不会顺带清图；清图与切主题不再绑定
+- `LvglDisplay::SetBackgroundImage()` 改为返回 `bool`；`LcdDisplay` 在转换失败/OOM 时返回 false，控制通道据此回 `success=false` + `extra.error`，修复“壁纸没生效却回成功”
+- `mode=background` 支持 JPEG/PNG：JPEG 已在下载任务解为 RGB565；PNG 在显示层用 lodepng 解为 ARGB8888 后转 RGB565（透明像素叠黑底），再 cover 裁剪。解码失败/OOM 回 `success=false`，错误为 `failed to apply background image`
+- `query_status` 增加诊断字段：`theme`、`volume`、`brightness`、`preview_active`、`wallpaper_active`、`imu_enabled`、`wake_word_running`，测试脚本无需读串口即可断言
+- 新增 `set_imu` 命令：运行时开关 IMU 运动检测，持久化到 NVS `imu/enabled`；`Board` 增加可选 `HasImu/SetImuEnabled/IsImuEnabled` 接口，无 IMU 板型保持默认
+- 预览图缩放增加上限：小图不再放大到屏宽 80%，最高保持原尺寸（scale ≤ 256），避免马赛克
+
+### 阶段十四：上游 v2.5.2 局部补丁（路线 A）
+
+保留本 fork 的 control MQTT/目标板定制，只移植以下上游修复：
+
+- MQTT `SendAudio()` 不再持 `channel_mutex_` 发送 UDP；`udp_` 改为 `shared_ptr`，发送期间对象不会被 `CloseAudioChannel()` 释放
+- WebSocket `ParseServerHello()` 先校验 `transport` 是字符串，避免非字符串字段导致 `strcmp(nullptr, ...)`
+- `LvglTheme::ParseColor()` 要求颜色至少 7 字符，避免 `#fff` 触发 `substr()` 异常
+- 自定义消息的 `cJSON_PrintUnformatted()` 改用 `CJsonStringUniquePtr`，修复每次消息的字符串泄漏
+- OGG demuxer 补齐末尾零长度 lace 的处理
+- OTA `ParseVersion()` 改用 `std::from_chars`，非法版本返回空结果而不是抛 `std::stoi` 异常
+
+暂未整体升级到 v2.5.2，因此 MCP 错误码/`max_length`、C++ 异常关闭、`NetworkResult`、epd 公共类等架构改动未合入。
 
 ## 8. 构建与验证
 
@@ -390,8 +427,8 @@ idf.py build
 当前结果（`waveshare/esp32-s3-touch-lcd-3.49-v2`，ESP-IDF v6.0.2）：
 
 ```
-xiaozhi.bin binary size 0x2ec3e0 bytes.
-Smallest app partition is 0x3f0000 bytes. 0x103c20 bytes (26%) free.
+xiaozhi.bin binary size 0x2eef20 bytes.
+Smallest app partition is 0x3f0000 bytes. 0x1010e0 bytes (25.5%) free.
 ```
 
 已验证：
@@ -407,12 +444,15 @@ Smallest app partition is 0x3f0000 bytes. 0x103c20 bytes (26%) free.
 2. `set_status` 的文字显示、`toggle_wake_word` 的唤醒行为
 3. `mcp` 在 Idle 下是否真正送达（依赖协议通道是否保持）
 4. 图片解码期间音频播放是否仍流畅（JPEG 解码在独立任务，理论不影响）
+5. 阶段十三改动：双击清图 / 三击切主题的实际手感、JPEG 壁纸显示、`set_imu` 开关、`query_status` 新诊断字段
 
 ## 9. 已知限制
 
 - `set_theme` 依赖显示实现注册的主题（LCD 为 `light` / `dark`，部分 OLED 只有 `dark`）；未注册的名字回 `success=false`
 - `set_image` 的图片会常驻屏幕，直到被新图替换、`{"clear":true}` 清除，或设备重新渲染 UI；`EmoteDisplay` / `OttoEmojiDisplay` 未覆写 `CancelPreviewTimeout()`，仍沿用各自行为
+- `set_image` 的 `mode=background` 支持 JPEG/PNG；PNG 需要额外的 ARGB8888 解码缓冲，1MP 级 PNG 可能因 PSRAM 不足回 `success=false`，壁纸建议控制在 512px 左右
 - `set_image` 有硬性上限：文件 ≤4MB、分辨率 ≤1280×1280 且 ≤100 万像素；超限直接回 `success=false`，无法通过配置调整
+- IMU 运动检测阈值固定 0.1g，静止放置偶发误触发；可用 `set_imu` 关闭，重启后仍保持 NVS 中的开关状态
 - `notify` 回复在播放真正开始前就返回成功（播放失败通过日志体现）
 - `play_sound` 已移除：上游只能按 OGG 字节播放，没有「按名字播音效」的接口
 - 明文 MQTT（非 8883 端口）不加密，凭据在网络上可见；生产环境建议换 8883 + TLS 或使用内网链路

@@ -5,6 +5,7 @@
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <atomic>
 #include <cmath>
 
 #include "application.h"
@@ -21,7 +22,8 @@
 
 class ImuMonitor {
 public:
-    bool Initialize(i2c_master_bus_handle_t bus) {
+    bool Initialize(i2c_master_bus_handle_t bus, bool enabled = true) {
+        enabled_ = enabled;
         i2c_device_config_t dev_cfg = {
             .dev_addr_length = I2C_ADDR_BIT_LEN_7,
             .device_address = QMI8658_ADDR,
@@ -56,9 +58,16 @@ public:
         ESP_LOGI(TAG, "QMI8658 initialized");
 
         // 启动监控任务
-        xTaskCreate(ImuTaskTrampoline, "imu_monitor", 4096, this, 2, nullptr);
+        if (xTaskCreate(ImuTaskTrampoline, "imu_monitor", 4096, this, 2, nullptr) != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create IMU task");
+            return false;
+        }
         return true;
     }
+
+    // Runtime switch used by the control channel (set_imu); persisted by the board.
+    void SetEnabled(bool enabled) { enabled_ = enabled; }
+    bool IsEnabled() const { return enabled_.load(); }
 
 private:
     static constexpr const char* TAG = "ImuMonitor";
@@ -67,6 +76,7 @@ private:
     // 状态机：检测运动 → 触发 StartListening
     float last_mag_ = 1.0f;          // 上次加速度幅值（g），静态约 1g
     int64_t last_trigger_us_ = 0;    // 上次触发时间
+    std::atomic<bool> enabled_{true};
     static constexpr int64_t COOLDOWN_US = 5 * 1000 * 1000;  // 5 秒冷却
     static constexpr float MOTION_THRESHOLD = 0.1f;  // 幅值变化阈值（g），极轻微动作即触发
 
@@ -112,6 +122,10 @@ private:
             float mag = sqrtf(x * x + y * y + z * z);
             float delta = fabsf(mag - last_mag_);
             last_mag_ = mag;
+
+            // Keep the baseline fresh while disabled, but never trigger. This makes
+            // runtime enable/disable through set_imu safe without a spurious event.
+            if (!enabled_.load()) continue;
 
             // 冷却期内不触发
             int64_t now = esp_timer_get_time();

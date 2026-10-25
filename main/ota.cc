@@ -18,6 +18,8 @@
 #endif
 
 #include <cstring>
+#include <charconv>
+#include <system_error>
 #include <vector>
 #include <sstream>
 #include <algorithm>
@@ -393,20 +395,42 @@ bool Ota::StartUpgrade(std::function<void(int progress, size_t speed)> callback)
 
 std::vector<int> Ota::ParseVersion(const std::string& version) {
     std::vector<int> versionNumbers;
-    std::stringstream ss(version);
-    std::string segment;
-    
-    while (std::getline(ss, segment, '.')) {
-        versionNumbers.push_back(std::stoi(segment));
+    size_t start = 0;
+
+    while (start <= version.size()) {
+        size_t end = version.find('.', start);
+        const std::string segment =
+            version.substr(start, end == std::string::npos ? std::string::npos : end - start);
+
+        int value = 0;
+        const char* begin = segment.data();
+        const char* finish = begin + segment.size();
+        auto [ptr, ec] = std::from_chars(begin, finish, value);
+        if (segment.empty() || ec != std::errc() || ptr != finish || value < 0) {
+            ESP_LOGW(TAG, "Invalid version segment \"%s\" in \"%s\"", segment.c_str(),
+                     version.c_str());
+            return {};
+        }
+        versionNumbers.push_back(value);
+
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
     }
-    
+
     return versionNumbers;
 }
 
 bool Ota::IsNewVersionAvailable(const std::string& currentVersion, const std::string& newVersion) {
     std::vector<int> current = ParseVersion(currentVersion);
     std::vector<int> newer = ParseVersion(newVersion);
-    
+    if (current.empty() || newer.empty()) {
+        ESP_LOGW(TAG, "Cannot compare versions: \"%s\" vs \"%s\"", currentVersion.c_str(),
+                 newVersion.c_str());
+        return false;
+    }
+
     for (size_t i = 0; i < std::min(current.size(), newer.size()); ++i) {
         if (newer[i] > current[i]) {
             return true;

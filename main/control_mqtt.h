@@ -95,6 +95,7 @@ private:
     void HandleNotify(cJSON* root);
     void HandleSetStatus(cJSON* root);
     void HandleTogglePowerSave(cJSON* root);
+    void HandleSetImu(cJSON* root);
     void HandleQueryStatus(cJSON* root);
 
     // Image download runs off the main task; the decoded image is applied on it.

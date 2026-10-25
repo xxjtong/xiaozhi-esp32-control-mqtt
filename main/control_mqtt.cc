@@ -451,6 +451,8 @@ void ControlMqtt::DispatchCommand(cJSON* root) {
         HandleSetStatus(root);
     } else if (cmd == "toggle_power_save") {
         HandleTogglePowerSave(root);
+    } else if (cmd == "set_imu") {
+        HandleSetImu(root);
     } else if (cmd == "query_status") {
         HandleQueryStatus(root);
     } else {
@@ -905,7 +907,13 @@ void ControlMqtt::ImageFetchTaskEntry(void* arg) {
                 return;
             }
             if (p->is_background) {
-                lvgl_display->SetBackgroundImage(std::move(image));
+                if (!lvgl_display->SetBackgroundImage(std::move(image))) {
+                    // The display consumed the image and could not convert it
+                    // (unsupported format or out of memory); report a real failure.
+                    self->SendReply("set_image", false, "",
+                                    MakeErrorExtra("failed to apply background image"));
+                    return;
+                }
                 ESP_LOGI(TAG, "Image applied as wallpaper");
             } else {
                 lvgl_display->SetPreviewImage(std::move(image));
@@ -1080,6 +1088,17 @@ void ControlMqtt::HandleTogglePowerSave(cJSON* root) {
     SendReply("toggle_power_save", true);
 }
 
+void ControlMqtt::HandleSetImu(cJSON* root) {
+    auto enable_j = cJSON_GetObjectItem(root, "enable");
+    bool enable = cJSON_IsBool(enable_j) ? enable_j->valueint : true;
+    if (!Board::GetInstance().SetImuEnabled(enable)) {
+        SendReply("set_imu", false, "", MakeErrorExtra("IMU not available on this board"));
+        return;
+    }
+    ESP_LOGI(TAG, "IMU motion detection %s", enable ? "enabled" : "disabled");
+    SendReply("set_imu", true);
+}
+
 void ControlMqtt::HandleQueryStatus(cJSON* root) {
     auto& app = Application::GetInstance();
     auto& board = Board::GetInstance();
@@ -1113,6 +1132,29 @@ void ControlMqtt::HandleQueryStatus(cJSON* root) {
     if (rssi != 0) {
         cJSON_AddNumberToObject(extra, "rssi", rssi);
     }
+
+    // UI / audio diagnostics: lets test scripts assert the result of a command
+    // without reading the serial log.
+    if (auto* display = board.GetDisplay()) {
+        if (auto* theme = display->GetTheme()) {
+            cJSON_AddStringToObject(extra, "theme", theme->name().c_str());
+        }
+        if (auto* lvgl_display = dynamic_cast<LvglDisplay*>(display)) {
+            cJSON_AddBoolToObject(extra, "preview_active", lvgl_display->HasPreviewImage());
+            cJSON_AddBoolToObject(extra, "wallpaper_active", lvgl_display->HasBackgroundImage());
+        }
+    }
+    if (auto* codec = board.GetAudioCodec()) {
+        cJSON_AddNumberToObject(extra, "volume", codec->output_volume());
+    }
+    if (auto* backlight = board.GetBacklight()) {
+        cJSON_AddNumberToObject(extra, "brightness", backlight->brightness());
+    }
+    if (board.HasImu()) {
+        cJSON_AddBoolToObject(extra, "imu_enabled", board.IsImuEnabled());
+    }
+    cJSON_AddBoolToObject(extra, "wake_word_running",
+                          app.GetAudioService().IsWakeWordRunning());
 
     cJSON_AddBoolToObject(extra, "mqtt_connected", connected_);
     SendReply("query_status", true, "", extra);

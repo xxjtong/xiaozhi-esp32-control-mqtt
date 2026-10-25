@@ -12,6 +12,7 @@
 #include <material_symbols.h>
 #include <noto_emoji.h>
 #include <src/misc/cache/lv_cache.h>
+#include <src/draw/lv_image_decoder_private.h>
 #include <algorithm>
 #include <cstring>
 #include <vector>
@@ -19,6 +20,14 @@
 #include "board.h"
 
 #define TAG "LcdDisplay"
+
+namespace {
+bool IsPngData(const uint8_t* data, size_t len) {
+    static const uint8_t kPngSignature[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    return data != nullptr && len >= sizeof(kPngSignature) &&
+           memcmp(data, kPngSignature, sizeof(kPngSignature)) == 0;
+}
+}  // namespace
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
@@ -1055,6 +1064,11 @@ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
         // LVGL scale unit is 1/256, so 256 == 100%.
         int32_t target_width = LV_HOR_RES * 8 / 10;
         int32_t scale = target_width * 256 / img_dsc->header.w;
+        // Never upscale beyond the source resolution: a small remote picture should
+        // stay sharp instead of being blown up to 80% of the screen width.
+        if (scale > 256) {
+            scale = 256;
+        }
         int32_t scaled_width = img_dsc->header.w * scale / 256;
         int32_t scaled_height = img_dsc->header.h * scale / 256;
         lv_image_set_scale(preview_image_, scale);
@@ -1136,14 +1150,56 @@ std::unique_ptr<LvglImage> LcdDisplay::CreateCoverBackground(std::unique_ptr<Lvg
         return nullptr;
     }
     const lv_img_dsc_t* dsc = src->image_dsc();
-    if (dsc == nullptr || dsc->data == nullptr || dsc->header.w <= 0 || dsc->header.h <= 0 ||
-        dsc->header.cf != LV_COLOR_FORMAT_RGB565) {
+    if (dsc == nullptr || dsc->data == nullptr || dsc->header.w <= 0 || dsc->header.h <= 0) {
+        ESP_LOGE(TAG, "CreateCoverBackground: invalid source image");
+        return nullptr;
+    }
+
+    const uint8_t* pixels = nullptr;
+    int sw = dsc->header.w;
+    int sh = dsc->header.h;
+    int sstride_bytes = dsc->header.stride;
+    bool source_argb = false;
+    bool decoder_open = false;
+    lv_image_decoder_dsc_t decoder_dsc = {};
+
+    if (dsc->header.cf == LV_COLOR_FORMAT_RGB565) {
+        pixels = dsc->data;
+        if (sstride_bytes <= 0) {
+            sstride_bytes = sw * 2;
+        }
+    } else if (IsPngData(dsc->data, dsc->data_size)) {
+        // PNG is decoded lazily by LVGL (lodepng -> ARGB8888). Decode it here,
+        // while the display lock is held, then cover-scale directly into RGB565.
+        lv_image_decoder_args_t args = {};
+        args.no_cache = true;
+        if (lv_image_decoder_open(&decoder_dsc, dsc, &args) != LV_RESULT_OK) {
+            ESP_LOGE(TAG, "CreateCoverBackground: PNG decode failed");
+            return nullptr;
+        }
+        decoder_open = true;
+        if (decoder_dsc.decoded == nullptr) {
+            ESP_LOGE(TAG, "CreateCoverBackground: PNG decode returned no pixels");
+            lv_image_decoder_close(&decoder_dsc);
+            return nullptr;
+        }
+        const lv_draw_buf_t* decoded = decoder_dsc.decoded;
+        if (decoded->header.cf != LV_COLOR_FORMAT_ARGB8888 || decoded->header.w <= 0 ||
+            decoded->header.h <= 0 || decoded->data == nullptr) {
+            ESP_LOGE(TAG, "CreateCoverBackground: unsupported PNG pixel format");
+            lv_image_decoder_close(&decoder_dsc);
+            return nullptr;
+        }
+        sw = decoded->header.w;
+        sh = decoded->header.h;
+        pixels = decoded->data;
+        sstride_bytes = decoded->header.stride > 0 ? decoded->header.stride : sw * 4;
+        source_argb = true;
+    } else {
         ESP_LOGE(TAG, "CreateCoverBackground: unsupported source image");
         return nullptr;
     }
 
-    const int sw = dsc->header.w;
-    const int sh = dsc->header.h;
     const int dw = LV_HOR_RES;
     const int dh = LV_VER_RES;
 
@@ -1160,11 +1216,13 @@ std::unique_ptr<LvglImage> LcdDisplay::CreateCoverBackground(std::unique_ptr<Lvg
     auto* dest = static_cast<uint16_t*>(heap_caps_malloc(dest_len, MALLOC_CAP_SPIRAM));
     if (dest == nullptr) {
         ESP_LOGE(TAG, "CreateCoverBackground: OOM (%zu bytes)", dest_len);
+        if (decoder_open) {
+            lv_image_decoder_close(&decoder_dsc);
+        }
         return nullptr;
     }
 
-    const auto* sbuf = reinterpret_cast<const uint16_t*>(dsc->data);
-    const int sstride = dsc->header.stride / 2;  // stride is in bytes; pixels per row
+    const int sstride_px = source_argb ? sstride_bytes / 4 : sstride_bytes / 2;
     for (int y = 0; y < dh; ++y) {
         int sy = static_cast<int>((crop_y + y) / scale);
         if (sy < 0) sy = 0;
@@ -1173,31 +1231,55 @@ std::unique_ptr<LvglImage> LcdDisplay::CreateCoverBackground(std::unique_ptr<Lvg
             int sx = static_cast<int>((crop_x + x) / scale);
             if (sx < 0) sx = 0;
             if (sx >= sw) sx = sw - 1;
-            dest[y * dw + x] = sbuf[sy * sstride + sx];
+            if (source_argb) {
+                // Composite transparent PNG pixels over black; fully opaque pixels
+                // keep their exact RGB values.
+                const auto* src32 = reinterpret_cast<const lv_color32_t*>(pixels);
+                const lv_color32_t c = src32[sy * sstride_px + sx];
+                const uint16_t r = static_cast<uint16_t>(c.red) * c.alpha / 255;
+                const uint16_t g = static_cast<uint16_t>(c.green) * c.alpha / 255;
+                const uint16_t b = static_cast<uint16_t>(c.blue) * c.alpha / 255;
+                dest[y * dw + x] = static_cast<uint16_t>(((r >> 3) << 11) | ((g >> 2) << 5) |
+                                                         (b >> 3));
+            } else {
+                const auto* src16 = reinterpret_cast<const uint16_t*>(pixels);
+                dest[y * dw + x] = src16[sy * sstride_px + sx];
+            }
         }
+    }
+
+    if (decoder_open) {
+        lv_image_decoder_close(&decoder_dsc);
     }
 
     return std::make_unique<LvglAllocatedImage>(dest, dest_len, dw, dh, dw * 2,
                                                 LV_COLOR_FORMAT_RGB565);
 }
 
-void LcdDisplay::SetBackgroundImage(std::unique_ptr<LvglImage> image) {
+bool LcdDisplay::SetBackgroundImage(std::unique_ptr<LvglImage> image) {
     DisplayLockGuard lock(this);
 
     auto bg = CreateCoverBackground(std::move(image));
     if (bg == nullptr) {
         ESP_LOGE(TAG, "SetBackgroundImage: failed to prepare wallpaper");
-        return;
+        return false;
     }
 
     // Install on both themes so the wallpaper survives light/dark switches.
     std::shared_ptr<LvglImage> shared_bg(std::move(bg));
     auto& mgr = LvglThemeManager::GetInstance();
+    int installed = 0;
     if (auto* light = mgr.GetTheme("light")) {
         light->set_background_image(shared_bg);
+        ++installed;
     }
     if (auto* dark = mgr.GetTheme("dark")) {
         dark->set_background_image(shared_bg);
+        ++installed;
+    }
+    if (installed == 0) {
+        ESP_LOGE(TAG, "SetBackgroundImage: no theme available");
+        return false;
     }
 
     // Re-apply the active theme so container_ picks up the new bg image.
@@ -1205,6 +1287,7 @@ void LcdDisplay::SetBackgroundImage(std::unique_ptr<LvglImage> image) {
         SetTheme(current_theme_);
     }
     ESP_LOGI(TAG, "Wallpaper set");
+    return true;
 }
 
 void LcdDisplay::ClearBackgroundImage() {
@@ -1220,6 +1303,27 @@ void LcdDisplay::ClearBackgroundImage() {
         SetTheme(current_theme_);
     }
     ESP_LOGI(TAG, "Wallpaper cleared");
+}
+
+bool LcdDisplay::HasPreviewImage() {
+    DisplayLockGuard lock(this);
+    return preview_image_cached_ != nullptr;
+}
+
+bool LcdDisplay::HasBackgroundImage() {
+    DisplayLockGuard lock(this);
+    auto& mgr = LvglThemeManager::GetInstance();
+    if (auto* light = mgr.GetTheme("light")) {
+        if (light->background_image() != nullptr) {
+            return true;
+        }
+    }
+    if (auto* dark = mgr.GetTheme("dark")) {
+        if (dark->background_image() != nullptr) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void LcdDisplay::SetEmotion(const char* emotion) {

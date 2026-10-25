@@ -47,6 +47,7 @@ private:
     bool is_PwrControlEn = false;
     AdcBatteryMonitor* adc_battery_monitor_ = nullptr;
     ImuMonitor imu_monitor_;
+    bool imu_available_ = false;
     RtcMonitor rtc_monitor_;
 
     void InitializeI2c() {
@@ -246,8 +247,14 @@ private:
 
     void InitializeImu() {
         // IMU 接在音频 I2C 总线上（GPIO 47/48），地址 0x6B
-        if (!imu_monitor_.Initialize(i2c_bus_)) {
+        // 可通过控制通道的 set_imu 命令或 NVS (imu/enabled) 关闭，避免调试时误触发。
+        Settings settings("imu", false);
+        bool enabled = settings.GetBool("enabled", true);
+        imu_available_ = imu_monitor_.Initialize(i2c_bus_, enabled);
+        if (!imu_available_) {
             ESP_LOGW(TAG, "IMU not initialized, gesture trigger disabled");
+        } else if (!enabled) {
+            ESP_LOGI(TAG, "IMU motion detection disabled by NVS");
         }
     }
 
@@ -314,6 +321,20 @@ public:
         discharging = adc_battery_monitor_->IsDischarging();
         return true;
     }
+
+    bool HasImu() override { return imu_available_; }
+
+    bool SetImuEnabled(bool enabled) override {
+        if (!imu_available_) {
+            return false;
+        }
+        imu_monitor_.SetEnabled(enabled);
+        Settings settings("imu", true);
+        settings.SetBool("enabled", enabled);
+        return true;
+    }
+
+    bool IsImuEnabled() override { return imu_available_ && imu_monitor_.IsEnabled(); }
 };
 
 DECLARE_BOARD(CustomBoard);

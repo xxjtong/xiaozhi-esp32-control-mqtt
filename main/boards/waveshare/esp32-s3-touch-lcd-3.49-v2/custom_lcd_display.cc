@@ -151,9 +151,16 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
     // to ensure lvgl objects are created after the display is fully initialized.
 }
 
+CustomLcdDisplay::~CustomLcdDisplay() {
+    if (click_timer_ != nullptr) {
+        lv_timer_delete(click_timer_);
+        click_timer_ = nullptr;
+    }
+}
+
 // 递归给对象树补上事件冒泡标志：
 // LVGL 的事件冒泡是逐级生效的，只有子对象自身带 EVENT_BUBBLE 标志时其事件才会传给父对象，
-// 因此需要覆盖从 container_ 往下的所有层级，否则深层对象上的双击到不了 container_。
+// 因此需要覆盖从 container_ 往下的所有层级，否则深层对象上的点击到不了 container_。
 void CustomLcdDisplay::EnableEventBubbling(lv_obj_t* obj) {
     uint32_t child_cnt = lv_obj_get_child_count(obj);
     for (uint32_t i = 0; i < child_cnt; i++) {
@@ -167,7 +174,7 @@ void CustomLcdDisplay::EnableEventBubbling(lv_obj_t* obj) {
 }
 
 // 聊天消息等对象在运行期动态创建，创建时补上冒泡标志，
-// 否则这些对象上的双击无法冒泡到 container_。
+// 否则这些对象上的点击无法冒泡到 container_。
 // LV_EVENT_CHILD_CREATED 会始终冒泡到所有父对象，故注册在 container_ 上即可覆盖整棵树。
 void CustomLcdDisplay::OnChildCreatedEvent(lv_event_t* e) {
     auto* child = static_cast<lv_obj_t*>(lv_event_get_param(e));
@@ -176,8 +183,15 @@ void CustomLcdDisplay::OnChildCreatedEvent(lv_event_t* e) {
     }
 }
 
-// 双击屏幕切换主题（light <-> dark）
+// 注册点击手势：双击清预览图、三击切换主题（light <-> dark）
 void CustomLcdDisplay::SetupUI() {
+    // 父类 SetupUI 自带重复调用保护；这里若已初始化过则直接返回，避免把点击
+    // 回调和手势定时器再注册一遍（否则一次点击会被处理两次）。
+    if (IsSetupUICalled()) {
+        ESP_LOGW(TAG, "SetupUI() called multiple times, skipping gesture setup");
+        return;
+    }
+
     // 先调用父类的 SetupUI 完成标准 UI 初始化
     LcdDisplay::SetupUI();
 
@@ -185,10 +199,14 @@ void CustomLcdDisplay::SetupUI() {
         return;
     }
 
+    // 父类 SetupUI 返回后已释放 LVGL 锁；这里继续改对象树/注册回调/创建定时器，
+    // 必须重新持有显示锁，避免与 LVGL 任务并发。
+    DisplayLockGuard lock(this);
+
     // emoji_box_ / emoji_image_ 只用于显示。空闲时会把全屏 logo 放进 emoji_image_，
     // 而 emoji_box_ 是 LV_SIZE_CONTENT，会被撑满整个屏幕；LVGL 里 lv_obj 默认带
-    // LV_OBJ_FLAG_CLICKABLE，这个全屏容器会把双击事件全部吞掉，导致 container_
-    // 收不到 LV_EVENT_DOUBLE_CLICKED、主题切换失效。这里去掉可点击标志让触摸穿透。
+    // LV_OBJ_FLAG_CLICKABLE，这个全屏容器会把点击事件全部吞掉，导致 container_
+    // 收不到点击、清图/切主题失效。这里去掉可点击标志让触摸穿透。
     lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_CLICKABLE);
@@ -200,43 +218,116 @@ void CustomLcdDisplay::SetupUI() {
     lv_obj_add_event_cb(container_, OnScreenClickEvent, LV_EVENT_SHORT_CLICKED, this);
 
     // 预览图容器铺满屏幕（为了支持上下拖动），它会吞掉落在图片区域上的点击，
-    // 事件也不会冒泡到 container_，所以这里单独挂一份双击判定。
+    // 事件也不会冒泡到 container_，所以这里单独挂一份点击判定。
     if (preview_viewport_ != nullptr) {
         lv_obj_add_event_cb(preview_viewport_, OnScreenClickEvent, LV_EVENT_SHORT_CLICKED, this);
     }
-    ESP_LOGI(TAG, "Theme switch on double-click enabled");
+    // One-shot style timer (paused until the second click) used to distinguish a
+    // double-click from a triple-click: the third click cancels the pending clear.
+    if (click_timer_ == nullptr) {
+        click_timer_ = lv_timer_create(OnClickTimer, CLICK_WINDOW_MS, this);
+        if (click_timer_ != nullptr) {
+            lv_timer_pause(click_timer_);
+        }
+    }
+    ESP_LOGI(TAG, "Double-click clears preview, triple-click switches theme");
 }
 
-// 双击切换主题（light <-> dark）。
-// 注意：不能用 LV_EVENT_DOUBLE_CLICKED —— LVGL 9 把单击/双击/三击做成「按 3 次循环」
-// 下发（见 lv_indev.c indev_proc_short_click：streak 1→SINGLE、2→DOUBLE、3→TRIPLE、
-// 4→SINGLE…），连续点击时只有第 2、5、8 次才是 DOUBLE_CLICKED，
-// 表现为「要连点 3 下才切换一次」。
-// 因此这里改用每次点击都会下发的 LV_EVENT_SHORT_CLICKED，自己按时间间隔判定双击。
+// 双击清预览图、三击切换主题（light <-> dark）。
+// 注意：不能用 LV_EVENT_DOUBLE_CLICKED / LV_EVENT_TRIPLE_CLICKED —— LVGL 9 把单击/双击/
+// 三击做成「按 3 次循环」下发（见 lv_indev.c indev_proc_short_click：streak 1→SINGLE、
+// 2→DOUBLE、3→TRIPLE、4→SINGLE…），连续点击时只有第 2、5、8 次才是 DOUBLE_CLICKED。
+// 因此这里改用每次点击都会下发的 LV_EVENT_SHORT_CLICKED，自己按时间间隔累计点击次数。
 void CustomLcdDisplay::OnScreenClickEvent(lv_event_t* e) {
     auto* self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
     if (self == nullptr) return;
 
     if (self->last_click_tick_ != 0 &&
-        lv_tick_elaps(self->last_click_tick_) <= DOUBLE_CLICK_WINDOW_MS) {
-        self->last_click_tick_ = 0;
-        self->ToggleTheme();
+        lv_tick_elaps(self->last_click_tick_) <= CLICK_WINDOW_MS) {
+        if (self->click_streak_ < 3) {
+            ++self->click_streak_;
+        }
     } else {
-        self->last_click_tick_ = lv_tick_get();
+        self->click_streak_ = 1;
+        // A new sequence started: cancel any pending double-click clear from the
+        // previous gesture (it may not have fired yet on a busy LVGL task).
+        self->pending_clear_ = false;
+        self->pending_clear_target_ = nullptr;
+        if (self->click_timer_ != nullptr) {
+            lv_timer_pause(self->click_timer_);
+        }
     }
+    self->last_click_tick_ = lv_tick_get();
+
+    if (self->click_streak_ == 2) {
+        // Wait for the window to expire before clearing: a third click within the
+        // window turns this into a triple-click and must cancel the clear.
+        {
+            DisplayLockGuard lock(self);
+            self->pending_clear_ = self->preview_image_cached_ != nullptr;
+            self->pending_clear_target_ = self->preview_image_cached_.get();
+        }
+        if (self->pending_clear_ && self->click_timer_ != nullptr) {
+            lv_timer_reset(self->click_timer_);
+            lv_timer_resume(self->click_timer_);
+        } else {
+            self->ClearPreviewImage();
+        }
+    } else if (self->click_streak_ == 3) {
+        // Consume the streak so a fourth click starts a new sequence.
+        self->click_streak_ = 0;
+        self->last_click_tick_ = 0;
+        self->pending_clear_ = false;
+        self->pending_clear_target_ = nullptr;
+        if (self->click_timer_ != nullptr) {
+            lv_timer_pause(self->click_timer_);
+        }
+        self->ToggleTheme();
+    }
+}
+
+void CustomLcdDisplay::OnClickTimer(lv_timer_t* timer) {
+    auto* self = static_cast<CustomLcdDisplay*>(lv_timer_get_user_data(timer));
+    if (self == nullptr) {
+        return;
+    }
+    lv_timer_pause(timer);
+    self->click_streak_ = 0;
+    self->last_click_tick_ = 0;
+    // A new image may have arrived inside the double-click window; only clear the
+    // exact image the user double-clicked on.
+    {
+        DisplayLockGuard lock(self);
+        if (self->pending_clear_ &&
+            self->preview_image_cached_.get() == self->pending_clear_target_) {
+            self->ClearPreviewImage();
+        }
+    }
+    self->pending_clear_ = false;
+    self->pending_clear_target_ = nullptr;
+}
+
+void CustomLcdDisplay::ClearPreviewImage() {
+    // The LVGL task (gesture timer/event) and the main task (remote set_image) can
+    // both touch preview_image_cached_; serialize the check with SetPreviewImage().
+    DisplayLockGuard lock(this);
+    if (preview_image_cached_ == nullptr) {
+        return;
+    }
+    // 远程下发的图片会常驻屏幕并挡住界面，双击时清除，恢复正常 UI。
+    ESP_LOGI(TAG, "Clearing persistent preview image on double-click");
+    SetPreviewImage(nullptr);
+    if (preview_image_cached_ != nullptr) {
+        // UI was not ready (or the display rejected the clear); don't claim success.
+        ESP_LOGW(TAG, "Failed to clear preview image");
+        return;
+    }
+    Application::GetInstance().ReportUserEvent("image_cleared", "double_click");
 }
 
 void CustomLcdDisplay::ToggleTheme() {
     Theme* current = GetTheme();
     if (current == nullptr) return;
-
-    // 远程下发的图片会常驻屏幕并挡住界面，双击时顺手清掉，恢复正常 UI。
-    // （LcdDisplay::SetTheme() 只改样式，不会重建对象树，所以图片不会自己消失）
-    if (preview_image_cached_ != nullptr) {
-        ESP_LOGI(TAG, "Clearing persistent preview image on double-click");
-        SetPreviewImage(nullptr);
-        Application::GetInstance().ReportUserEvent("image_cleared", "double_click");
-    }
 
     std::string current_name = current->name();
     std::string next_name = (current_name == "light") ? "dark" : "light";

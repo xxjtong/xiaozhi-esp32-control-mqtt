@@ -127,8 +127,8 @@ xiaozhi-esp32-main/
 - **`Schedule(func)`**：把任意任务中的操作投递到主任务执行——这是全项目的线程纪律核心（回调可能来自任意任务，但状态修改必须回到主任务）。
 - 管理：协议对象生命周期、音频服务启停、设备状态切换、OTA、MCP 消息分发。
 - 本 fork 增量：
-  - `ReportUserEvent(event, value)`（L1176 起）：把本地用户行为事件经 `Schedule()` 后由 ControlMqtt 发布；
-  - 状态机监听器（L93 起）：每次进入 `Speaking` 记一次 `interaction` 事件（即一轮人机交互）；
+  - `ReportUserEvent(event, value)`（L1181 起）：把本地用户行为事件经 `Schedule()` 后由 ControlMqtt 发布；
+  - 状态机监听器（L94 起）：每次进入 `Speaking` 记一次 `interaction` 事件（即一轮人机交互）；
   - 唤醒词触发时上报 `wake_word` 事件。
 
 ### 4.2 音频子系统（[main/audio/](main/audio/)，另有详细 [main/audio/README.md](main/audio/README.md)）
@@ -150,7 +150,7 @@ xiaozhi-esp32-main/
 - 继承链：`Display`（抽象）→ `LvglDisplay`（LVGL 通用：状态栏/状态文字/通知/弹窗）→ `LcdDisplay`（LCD 屏） / `OledDisplay`。
 - 本 fork 增量：
   - `SetStatusColor(rgb)`：状态文字颜色（配合远程 `set_status` 命令，默认颜色随主题自动恢复）；
-  - 预览图容器 `preview_viewport_`：全屏透明滚动容器，图片按**屏宽 80%** 等比缩放居中，支持上下拖动，双击清图（[main/display/lcd_display.cc](main/display/lcd_display.cc)）。
+  - 预览图容器 `preview_viewport_`：全屏透明滚动容器，图片按**屏宽 80%** 等比缩放居中（小图不放大），支持上下拖动，双击清图、三击切主题（[main/display/lcd_display.cc](main/display/lcd_display.cc)）。
 
 ### 4.5 板级抽象（[main/boards/common/board.h](main/boards/common/board.h)）
 
@@ -173,9 +173,9 @@ xiaozhi-esp32-main/
 | 屏幕 | AXS15231B QSPI，物理 172×640，`DISPLAY_ROTATION_90` + `lv_display_set_rotation(270)` → 可用区域 **640×172** 横条屏 |
 | 音频 | ES8311（DAC）+ ES7210（ADC），本板开启 `CONFIG_USE_DEVICE_AEC=y`（回声消除，Realtime 连续聆听模式） |
 | IO 扩展 | TCA9554（背光/功放使能等） |
-| IMU | 运动检测：状态改变视为用户行为，触发 `ToggleChatState()` 并上报 `motion_detected` 事件 |
+| IMU | 运动检测：状态改变视为用户行为，触发 `ToggleChatState()` 并上报 `motion_detected` 事件；可用 `set_imu` 运行时关闭 |
 | 电池 | ADC1_CH3 (GPIO4)，200kΩ/100kΩ 3:1 分压采样 |
-| 触摸 | 双击屏幕任意区域切换明暗主题（浅色/深色），有常驻图时先清图 |
+| 触摸 | 双击清除常驻预览图（上报 `image_cleared`），三击切换明暗主题（上报 `theme_changed`） |
 
 代码：[main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/](main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/)（含 `custom_lcd_display.cc`、`imu_monitor.h`）。
 
@@ -191,7 +191,7 @@ xiaozhi-esp32-main/
 
 ### 5.3 控制命令接口（下行：`xiaozhi/<id>/cmd`）
 
-所有命令为 JSON，`type` 字段区分；执行结果经 reply 主题回执 `{"type":"reply","command":"<type>","success":true|false,...}`。
+所有命令为 JSON，`type` 字段区分；执行结果经 reply 主题回执 `{"type":"reply","command_type":"<type>","success":true|false,...}`。
 
 | type | 功能 | 主要参数 | 状态约束 |
 |---|---|---|---|
@@ -199,7 +199,7 @@ xiaozhi-esp32-main/
 | `abort` | 中断当前会话/说话 | `reason`（可选） | 任意时刻 |
 | `mcp` | 调用设备端 MCP 工具 | MCP JSON-RPC 消息体 | 仅 Idle（避免与主会话冲突） |
 | `system` | 系统命令 | `command: "reboot"` 等 | — |
-| `set_image` | 下发/清除图片 | `url`（HTTP/JPEG·PNG），或 `clear:true`；可选 `mode: "preview"\|"background"` | preview 浮层常驻 / background 桌面壁纸（cover 裁剪，跨主题保留） |
+| `set_image` | 下发/清除图片 | `url`（HTTP/JPEG·PNG），或 `clear:true`；可选 `mode: "preview"\|"background"` | preview 浮层常驻 / background 桌面壁纸（cover 裁剪，跨主题保留；支持 JPEG/PNG） |
 | `set_theme` | 切换明暗主题 | `name: "dark"|"light"` | — |
 | `set_volume` | 设置音量 | `volume: 0-100` | — |
 | `set_brightness` | 设置背光 | `brightness: 0-100` | — |
@@ -207,21 +207,22 @@ xiaozhi-esp32-main/
 | `notify` | 播放提示音/通知 | — | 仅 Idle |
 | `set_status` | 状态栏文字（可滚动） | `text`，可选 `color`（色名或 `#RRGGBB`） | — |
 | `toggle_power_save` | 切换省电模式 | — | — |
-| `query_status` | 查询设备状态 | — | extra 返回 `ip/ssid/rssi`（有值才带） |
+| `set_imu` | 开关 IMU 运动检测 | `enable: true\|false`（缺省 true） | 仅支持带 IMU 的板型；持久化到 NVS `imu/enabled` |
+| `query_status` | 查询设备状态 | — | extra 返回 `ip/ssid/rssi/battery/temperature/theme/volume/brightness/preview_active/wallpaper_active/imu_enabled/wake_word_running`（有值才带） |
 
 **图片链路实现**（`HandleSetImage` → `ImageFetchTaskEntry`）：
 1. 下载任务（独立任务，栈 12KB，原子量单飞）；
 2. HTTP 头部预检 `Content-Length` > 4MB 直接拒绝（不下载）；
 3. JPEG/PNG 头部解析宽高（扫 SOF / IHDR），超过 1280×1280 或 100 万像素拒绝（不分配解码内存）；
 4. JPEG 经 `jpeg_to_image` 解为 RGB565，主任务构造 `LvglAllocatedImage`；
-5. 显示按 `mode` 分流：`preview`（默认）按 `LV_HOR_RES*80%` 等比缩放、垂直居中、可上下拖动，`CancelPreviewTimeout()` 常驻；`background` 经 `CreateCoverBackground()` 做 cover 居中裁剪到屏尺寸，写入 light/dark 主题的 `background_image` 后 `SetTheme` 重绘背景层。
+5. 显示按 `mode` 分流：`preview`（默认）按 `LV_HOR_RES*80%` 等比缩放（小图不放大超过原尺寸）、垂直居中、可上下拖动，`CancelPreviewTimeout()` 常驻；`background` 经 `CreateCoverBackground()` 做 cover 居中裁剪到屏尺寸，写入 light/dark 主题的 `background_image` 后 `SetTheme` 重绘背景层。JPEG 直接使用解码后的 RGB565；PNG 在显示层用 LVGL lodepng 解为 ARGB8888 后转 RGB565（透明像素叠黑底）。解码/OOM 失败如实回 `success=false`。
 
 ### 5.4 上行消息（`xiaozhi/<id>/reply`）
 
 | type | 时机 | 关键字段 |
 |---|---|---|
 | `hello` | 连接/重连成功后 | `device_id/status/version/ip` |
-| `reply` | 每条命令的执行回执 | `command/success/message` |
+| `reply` | 每条命令的执行回执 | `command_type/success/device_state/extra` |
 | `goodbye` | 停用/析构前 | — |
 | `event` | 本地用户行为 | `device_id/event/value/state/uptime_ms/seq` |
 
@@ -233,13 +234,13 @@ xiaozhi-esp32-main/
 | `interaction` | 一轮人机交互（进入 Speaking 计一次） | 状态机监听器 `old!=Speaking && new==Speaking` |
 | `button_click` | BOOT 按键单击 | 板级 `boot_button_.OnClick` |
 | `motion_detected` | IMU 检测到姿态变化 | `imu_monitor.h` |
-| `image_cleared` | 双击清除常驻图片 | `custom_lcd_display.cc` |
-| `theme_changed` | 双击切换主题 | `custom_lcd_display.cc`，value=新主题名 |
+| `image_cleared` | 双击清除常驻预览图 | `custom_lcd_display.cc` |
+| `theme_changed` | 三击切换主题 | `custom_lcd_display.cc`，value=新主题名 |
 
 ### 5.5 网络信息上报
 
 - `Board` 层新增 `GetIpAddress/GetWifiSsid/GetWifiRssi` 可选接口（[main/boards/common/board.h](main/boards/common/board.h)），`WifiBoard` 实现之；
-- `hello` 消息携带 `ip`；`query_status` 的 extra 携带 `ip/ssid/rssi`。
+- `hello` 消息携带 `ip`；`query_status` 的 extra 携带 `ip/ssid/rssi`，并补充 `theme/volume/brightness/preview_active/wallpaper_active/imu_enabled/wake_word_running` 等自测诊断字段。
 
 ### 5.6 其他定制
 
@@ -318,10 +319,11 @@ main.cc → Board 单例 → Application::Start()
 ```
 cmd: set_image{url, mode?} → 下载任务（头部预检：≤4MB；解码预检：≤1280px/1MP）
   → JPEG→RGB565 → 主任务建 LvglAllocatedImage
-  → mode=preview（默认）：80% 屏宽缩放浮层显示（可拖动、常驻）
-  → mode=background：cover 居中裁剪铺满全屏 → 写入 light/dark 主题的
+  → mode=preview（默认）：80% 屏宽缩放浮层显示（可拖动、常驻；小图不放大）
+  → mode=background：JPEG/PNG（PNG 先解为 ARGB8888），cover 居中裁剪铺满全屏 → 写入 light/dark 主题的
     background_image（LvglTheme 机制）→ SetTheme 重绘 container_ 底层
-双击屏幕 → 清预览图（上报 image_cleared）→ 切主题（上报 theme_changed，壁纸保留）
+双击屏幕 → 清预览图（上报 image_cleared；壁纸保留）
+三击屏幕 → 切主题（上报 theme_changed）
 {"clear":true} → 同时清预览与壁纸
 ```
 
@@ -361,8 +363,22 @@ cmd: set_image{url, mode?} → 下载任务（头部预检：≤4MB；解码预�
 ## 11. 已知限制与待办
 
 - OTA 升级执行已禁用（仅保留版本有效性标记），远程升级需另行恢复；
+- `set_image` 的 `mode=background` 支持 JPEG/PNG；PNG 需在显示层解为 ARGB8888 再转 RGB565，1MP 级 PNG 的内存峰值较高，解码或分配失败会回 `success=false`；
 - `interaction` 事件以"进入 Speaking"计数，服务端拆分 TTS 时可能多计；
 - 聆听→待机由服务端 goodbye 驱动，设备无本地静音超时兜底；
-- host 测试存在 1 项既存失败（板级 `config.json` 唤醒词断言，与本 fork 功能无关）；
-- IMU 运动检测灵敏度偏高（0.1g 阈值），静态放置偶发误触发；
-- 控制通道事件为 QoS 0，设备离线期间的事件不补发。
+- host 测试存在 1 项失败：板级 `config.json` 的 `CONFIG_SR_WN_...=n` 触发上游「唤醒词不得写在板级配置」断言，跑 unittest/CI 会红，本地 `build.py` 不受影响；
+- IMU 运动检测灵敏度偏高（0.1g 阈值），静态放置偶发误触发；调试时可用 `{"type":"set_imu","enable":false}` 关闭（持久化到 NVS `imu/enabled`）；
+- 控制通道事件为 QoS 0，设备离线期间的事件不补发；
+- `PROJECT_VER` 仍为 `2.4.2`；2026-10-25 只合入上游 v2.5.2 的部分局部修复（阶段十四），不是完整升级，MCP 错误码/`max_length`、C++ 异常关闭、`NetworkResult`、epd 公共类等未合入。
+
+---
+
+## 12. 变更记录（2026-10-25）
+
+- 壁纸支持 PNG：`CreateCoverBackground()` 在显示层用 LVGL lodepng 解为 ARGB8888，再 cover 裁剪并转 RGB565（透明像素叠黑底）；`SetBackgroundImage()` 改为返回 `bool`，失败不再假成功。
+- 手势拆分：双击清除双击时的那张预览图（500ms 确认窗口），三击切换主题；三击取消待执行的双击清图，不会顺带清图。
+- IMU 增加运行时开关：`set_imu` 命令，NVS `imu/enabled` 持久化；`Board` 增加 `HasImu/SetImuEnabled/IsImuEnabled` 可选接口。
+- `query_status` 增加 `theme/volume/brightness/preview_active/wallpaper_active/imu_enabled/wake_word_running` 诊断字段。
+- 预览小图不再放大到屏宽 80%，最高保持原尺寸。
+- 路线 A 上游补丁：MQTT `SendAudio` 解锁、WebSocket `transport` 类型校验、主题短颜色保护、cJSON 自定义消息释放、OGG 末尾零长度 lace、OTA 版本非抛异常解析；详见 [docs/control-mqtt.md](docs/control-mqtt.md) 阶段十三/十四。
+- 验证：目标板应用固件重新编译/链接，`xiaozhi.bin` 为 `0x2eef20`，分区余量 25.5%；合并固件已更新；改动文件 `-Wall -Wextra` 无 warning；host 测试 66/67，唯一失败仍是板级唤醒词配置断言。
