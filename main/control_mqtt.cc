@@ -538,6 +538,7 @@ namespace {
 struct ImageFetchArgs {
     ControlMqtt* self;
     std::string url;
+    bool is_background = false;  // true: set as wallpaper; false: floating preview
     std::shared_ptr<std::atomic<bool>> alive;
 };
 
@@ -549,6 +550,7 @@ struct PendingPreview {
     int width = 0;
     int height = 0;
     int stride = 0;
+    bool is_background = false;
     const char* error = nullptr;  // static string, reason for a failed fetch/decode
 };
 
@@ -680,7 +682,8 @@ cJSON* MakeErrorExtra(const char* message) {
 }  // namespace
 
 void ControlMqtt::HandleSetImage(cJSON* root) {
-    // {"type":"set_image","clear":true} restores the normal UI.
+    // {"type":"set_image","clear":true} restores the normal UI (clears both the
+    // floating preview and any wallpaper set with mode=background).
     auto clear_j = cJSON_GetObjectItem(root, "clear");
     if (cJSON_IsTrue(clear_j)) {
         auto* lvgl_display = dynamic_cast<LvglDisplay*>(Board::GetInstance().GetDisplay());
@@ -689,6 +692,7 @@ void ControlMqtt::HandleSetImage(cJSON* root) {
             return;
         }
         lvgl_display->SetPreviewImage(nullptr);
+        lvgl_display->ClearBackgroundImage();
         SendReply("set_image", true);
         return;
     }
@@ -704,7 +708,14 @@ void ControlMqtt::HandleSetImage(cJSON* root) {
         return;
     }
 
-    auto* args = new (std::nothrow) ImageFetchArgs{this, url_j->valuestring, alive_};
+    // "mode":"background" sets the picture as a persistent wallpaper; any other
+    // value (or absent) keeps the original floating-preview behavior.
+    auto mode_j = cJSON_GetObjectItem(root, "mode");
+    bool is_background =
+        (cJSON_IsString(mode_j) && std::string(mode_j->valuestring) == "background");
+
+    auto* args =
+        new (std::nothrow) ImageFetchArgs{this, url_j->valuestring, is_background, alive_};
     if (args == nullptr) {
         SendReply("set_image", false);
         return;
@@ -785,6 +796,7 @@ void ControlMqtt::ImageFetchTaskEntry(void* arg) {
         }
     } while (false);
 
+    bool is_background = args->is_background;
     args.reset();
 
     auto* pending = new (std::nothrow) PendingPreview;
@@ -803,6 +815,7 @@ void ControlMqtt::ImageFetchTaskEntry(void* arg) {
     }
     pending->data = data;
     pending->len = total;
+    pending->is_background = is_background;
 
     if (pending->data != nullptr && total == 0) {
         heap_caps_free(data);
@@ -891,11 +904,16 @@ void ControlMqtt::ImageFetchTaskEntry(void* arg) {
                 self->SendReply("set_image", false, "", MakeErrorExtra(kImageTooLargeError));
                 return;
             }
-            lvgl_display->SetPreviewImage(std::move(image));
-            // Upstream auto-hides previews after 5s; a remote screen image should stay
-            // until it is replaced or cleared.
-            lvgl_display->CancelPreviewTimeout();
-            ESP_LOGI(TAG, "Image applied; it stays until replaced or cleared");
+            if (p->is_background) {
+                lvgl_display->SetBackgroundImage(std::move(image));
+                ESP_LOGI(TAG, "Image applied as wallpaper");
+            } else {
+                lvgl_display->SetPreviewImage(std::move(image));
+                // Upstream auto-hides previews after 5s; a remote screen image should stay
+                // until it is replaced or cleared.
+                lvgl_display->CancelPreviewTimeout();
+                ESP_LOGI(TAG, "Image applied as preview; it stays until replaced or cleared");
+            }
             self->SendReply("set_image", true);
         } catch (const std::exception& e) {
             // The constructor does not take ownership when it throws.

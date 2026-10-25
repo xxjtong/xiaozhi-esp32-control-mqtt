@@ -5,6 +5,7 @@
 #include "settings.h"
 
 #include <esp_err.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
@@ -1128,6 +1129,97 @@ void LcdDisplay::CancelPreviewTimeout() {
         // PREVIEW_IMAGE_DURATION_MS.
         esp_timer_stop(preview_timer_);
     }
+}
+
+std::unique_ptr<LvglImage> LcdDisplay::CreateCoverBackground(std::unique_ptr<LvglImage> src) {
+    if (src == nullptr) {
+        return nullptr;
+    }
+    const lv_img_dsc_t* dsc = src->image_dsc();
+    if (dsc == nullptr || dsc->data == nullptr || dsc->header.w <= 0 || dsc->header.h <= 0 ||
+        dsc->header.cf != LV_COLOR_FORMAT_RGB565) {
+        ESP_LOGE(TAG, "CreateCoverBackground: unsupported source image");
+        return nullptr;
+    }
+
+    const int sw = dsc->header.w;
+    const int sh = dsc->header.h;
+    const int dw = LV_HOR_RES;
+    const int dh = LV_VER_RES;
+
+    // Cover: scale so the smaller relative dimension fills the screen, then
+    // center-crop the overflow. This is the standard wallpaper behavior.
+    const float scale_w = static_cast<float>(dw) / sw;
+    const float scale_h = static_cast<float>(dh) / sh;
+    const float scale = (scale_w > scale_h) ? scale_w : scale_h;
+
+    const int crop_x = static_cast<int>((sw * scale - dw) / 2.0f);
+    const int crop_y = static_cast<int>((sh * scale - dh) / 2.0f);
+
+    const size_t dest_len = static_cast<size_t>(dw) * dh * 2;
+    auto* dest = static_cast<uint16_t*>(heap_caps_malloc(dest_len, MALLOC_CAP_SPIRAM));
+    if (dest == nullptr) {
+        ESP_LOGE(TAG, "CreateCoverBackground: OOM (%zu bytes)", dest_len);
+        return nullptr;
+    }
+
+    const auto* sbuf = reinterpret_cast<const uint16_t*>(dsc->data);
+    const int sstride = dsc->header.stride / 2;  // stride is in bytes; pixels per row
+    for (int y = 0; y < dh; ++y) {
+        int sy = static_cast<int>((crop_y + y) / scale);
+        if (sy < 0) sy = 0;
+        if (sy >= sh) sy = sh - 1;
+        for (int x = 0; x < dw; ++x) {
+            int sx = static_cast<int>((crop_x + x) / scale);
+            if (sx < 0) sx = 0;
+            if (sx >= sw) sx = sw - 1;
+            dest[y * dw + x] = sbuf[sy * sstride + sx];
+        }
+    }
+
+    return std::make_unique<LvglAllocatedImage>(dest, dest_len, dw, dh, dw * 2,
+                                                LV_COLOR_FORMAT_RGB565);
+}
+
+void LcdDisplay::SetBackgroundImage(std::unique_ptr<LvglImage> image) {
+    DisplayLockGuard lock(this);
+
+    auto bg = CreateCoverBackground(std::move(image));
+    if (bg == nullptr) {
+        ESP_LOGE(TAG, "SetBackgroundImage: failed to prepare wallpaper");
+        return;
+    }
+
+    // Install on both themes so the wallpaper survives light/dark switches.
+    std::shared_ptr<LvglImage> shared_bg(std::move(bg));
+    auto& mgr = LvglThemeManager::GetInstance();
+    if (auto* light = mgr.GetTheme("light")) {
+        light->set_background_image(shared_bg);
+    }
+    if (auto* dark = mgr.GetTheme("dark")) {
+        dark->set_background_image(shared_bg);
+    }
+
+    // Re-apply the active theme so container_ picks up the new bg image.
+    if (current_theme_ != nullptr) {
+        SetTheme(current_theme_);
+    }
+    ESP_LOGI(TAG, "Wallpaper set");
+}
+
+void LcdDisplay::ClearBackgroundImage() {
+    DisplayLockGuard lock(this);
+    auto& mgr = LvglThemeManager::GetInstance();
+    if (auto* light = mgr.GetTheme("light")) {
+        light->set_background_image(nullptr);
+    }
+    if (auto* dark = mgr.GetTheme("dark")) {
+        dark->set_background_image(nullptr);
+    }
+    if (current_theme_ != nullptr) {
+        SetTheme(current_theme_);
+    }
+    ESP_LOGI(TAG, "Wallpaper cleared");
 }
 
 void LcdDisplay::SetEmotion(const char* emotion) {

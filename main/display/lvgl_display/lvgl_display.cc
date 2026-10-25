@@ -326,6 +326,12 @@ void LvglDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {}
 
 void LvglDisplay::CancelPreviewTimeout() {}
 
+void LvglDisplay::SetBackgroundImage(std::unique_ptr<LvglImage> image) {
+    (void)image;
+}
+
+void LvglDisplay::ClearBackgroundImage() {}
+
 void LvglDisplay::SetPowerSaveMode(bool on) {
     if (on) {
         SetChatMessage("system", "");

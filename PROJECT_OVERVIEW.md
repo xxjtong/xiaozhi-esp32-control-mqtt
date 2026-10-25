@@ -199,7 +199,7 @@ xiaozhi-esp32-main/
 | `abort` | 中断当前会话/说话 | `reason`（可选） | 任意时刻 |
 | `mcp` | 调用设备端 MCP 工具 | MCP JSON-RPC 消息体 | 仅 Idle（避免与主会话冲突） |
 | `system` | 系统命令 | `command: "reboot"` 等 | — |
-| `set_image` | 下发/清除图片 | `url`（HTTP/JPEG·PNG）或 `clear:true` | 图片常驻显示 |
+| `set_image` | 下发/清除图片 | `url`（HTTP/JPEG·PNG），或 `clear:true`；可选 `mode: "preview"\|"background"` | preview 浮层常驻 / background 桌面壁纸（cover 裁剪，跨主题保留） |
 | `set_theme` | 切换明暗主题 | `name: "dark"|"light"` | — |
 | `set_volume` | 设置音量 | `volume: 0-100` | — |
 | `set_brightness` | 设置背光 | `brightness: 0-100` | — |
@@ -214,7 +214,7 @@ xiaozhi-esp32-main/
 2. HTTP 头部预检 `Content-Length` > 4MB 直接拒绝（不下载）；
 3. JPEG/PNG 头部解析宽高（扫 SOF / IHDR），超过 1280×1280 或 100 万像素拒绝（不分配解码内存）；
 4. JPEG 经 `jpeg_to_image` 解为 RGB565，主任务构造 `LvglAllocatedImage`；
-5. 显示：按 `LV_HOR_RES*80%` 等比缩放、垂直居中、可上下拖动；`CancelPreviewTimeout()` 使图片常驻（不自动消失）。
+5. 显示按 `mode` 分流：`preview`（默认）按 `LV_HOR_RES*80%` 等比缩放、垂直居中、可上下拖动，`CancelPreviewTimeout()` 常驻；`background` 经 `CreateCoverBackground()` 做 cover 居中裁剪到屏尺寸，写入 light/dark 主题的 `background_image` 后 `SetTheme` 重绘背景层。
 
 ### 5.4 上行消息（`xiaozhi/<id>/reply`）
 
@@ -316,9 +316,13 @@ main.cc → Board 单例 → Application::Start()
 ### 8.3 远程图片下发
 
 ```
-cmd: set_image{url} → 下载任务（头部预检：≤4MB；解码预检：≤1280px/1MP）
-  → JPEG→RGB565 → 主任务建 LvglAllocatedImage → 80% 屏宽缩放显示（可拖动、常驻）
-双击屏幕 → 清图（上报 image_cleared）→ 切主题（上报 theme_changed）
+cmd: set_image{url, mode?} → 下载任务（头部预检：≤4MB；解码预检：≤1280px/1MP）
+  → JPEG→RGB565 → 主任务建 LvglAllocatedImage
+  → mode=preview（默认）：80% 屏宽缩放浮层显示（可拖动、常驻）
+  → mode=background：cover 居中裁剪铺满全屏 → 写入 light/dark 主题的
+    background_image（LvglTheme 机制）→ SetTheme 重绘 container_ 底层
+双击屏幕 → 清预览图（上报 image_cleared）→ 切主题（上报 theme_changed，壁纸保留）
+{"clear":true} → 同时清预览与壁纸
 ```
 
 ---

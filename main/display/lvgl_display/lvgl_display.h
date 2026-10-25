@@ -29,6 +29,10 @@ public:
     // Stop any auto-hide timer so the currently shown preview stays on screen.
     // Displays without such a timer can keep the default no-op.
     virtual void CancelPreviewTimeout();
+    // Use the image as the desktop background (persists across theme switches).
+    // Displays without a wallpaper layer keep the default no-op.
+    virtual void SetBackgroundImage(std::unique_ptr<LvglImage> image);
+    virtual void ClearBackgroundImage();
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
     virtual bool SnapshotToJpeg(std::string& jpeg_data, int quality = 80);

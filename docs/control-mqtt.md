@@ -105,7 +105,7 @@
 | `abort` | `reason`: 可选 `wake_word_detected` | Connecting / Listening / Speaking | 打断当前回合；不可用时回 `success=false` |
 | `mcp` | `payload`: JSON object | Idle | 透传给 MCP 管道 |
 | `system` | `command`: `reboot` | 任意 | 先发回复再重启 |
-| `set_image` | `url`，或 `clear: true` 清除 | 需 LVGL 显示 | 下载图片并常驻显示（文件 ≤4MB，分辨率 ≤1280×1280 且 ≤1MP），支持 JPEG / PNG；`clear` 恢复默认 UI。服务端规格建议见 6.3 |
+| `set_image` | `url`，或 `clear: true` 清除，可选 `mode` | 需 LVGL 显示 | 下载图片并显示（文件 ≤4MB，分辨率 ≤1280×1280 且 ≤1MP），支持 JPEG / PNG。`mode` 可选：`preview`（默认，浮层居中显示，可拖动，双击清除）或 `background`（设为桌面壁纸，cover 居中裁剪铺满全屏，跨主题切换保留，双击不清）。`clear` 同时清除预览与壁纸。服务端规格建议见 6.3 |
 | `set_theme` | `theme`: `light` / `dark` | 需带主题的显示 | 与双击屏幕切换走同一条路径（`LvglThemeManager`） |
 | `set_volume` | `level`: 0–100 | 需音频 Codec | 写入 NVS 持久化 |
 | `set_brightness` | `level`: 0–100 | 需 Backlight | 持久化到 NVS |
@@ -371,6 +371,14 @@ abort (idle)     -> success=false       （此前误报成功）
 - `WifiBoard` 从 `WifiManager` 取值；`EthernetBoard` 返回缓存的 IP；`DualNetworkBoard` 委托当前板卡
 - `hello` 增加 `ip`；`query_status` 的 `extra` 增加 `ip`、`ssid`、`rssi`（有值时才带）
 - 蜂窝板型（ML307/ NT26 等）无对应数据时自动省略，不影响旧字段
+
+### 阶段十二：远程桌面壁纸
+
+- `set_image` 增加可选 `mode` 字段：`preview`（默认，原浮层行为）/ `background`（桌面壁纸）
+- 壁纸复用项目原有主题背景图机制：`LvglTheme::set_background_image()` 把图装到 light/dark 两个主题上，`SetTheme()` 时由 `lv_obj_set_style_bg_image_src(container_, ...)` 绘制到全屏背景层，UI 元素自然浮在其上
+- 新增 `LcdDisplay::CreateCoverBackground()`：最近邻 cover 缩放（按短边铺满、居中裁剪）到 `LV_HOR_RES × LV_VER_RES` 的 RGB565 缓冲，存 PSRAM
+- 壁纸跨明暗主题切换保留（同时注册到两个主题）；双击屏幕只切主题不清壁纸；清壁纸走 `{"type":"set_image","clear":true}`
+- 当前为会话级（运行时内存），断电重启后恢复纯色背景；如需持久化可后续存到 SPIFFS
 
 ## 8. 构建与验证
 

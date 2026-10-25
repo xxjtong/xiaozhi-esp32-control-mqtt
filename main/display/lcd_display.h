@@ -35,6 +35,8 @@ protected:
     bool hide_subtitle_ = false;  // Control whether to hide chat messages/subtitles
 
     void InitializeLcdThemes();
+    // Cover-scale (center-crop) an image to the screen size for use as wallpaper.
+    std::unique_ptr<LvglImage> CreateCoverBackground(std::unique_ptr<LvglImage> src);
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
 
@@ -50,6 +52,8 @@ public:
     virtual void ClearChatMessages() override;
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
     virtual void CancelPreviewTimeout() override;
+    virtual void SetBackgroundImage(std::unique_ptr<LvglImage> image) override;
+    virtual void ClearBackgroundImage() override;
     virtual void SetupUI() override;
     // Add theme switching function
     virtual void SetTheme(Theme* theme) override;
