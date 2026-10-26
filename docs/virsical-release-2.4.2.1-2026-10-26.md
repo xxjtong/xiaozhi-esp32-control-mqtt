@@ -53,6 +53,17 @@
 - 测试临时预览图、背景壁纸、清除图片、IMU 开关、主题切换、状态提示。
 - 控制背景图的分辨率和文件大小，确认 PNG/JPEG 的可用边界。
 
+### 2.3 下午追加：远程播报闭环与本地停止手势
+
+面向“服务平台下发语音播报”场景（对接 FM 工单、会议提醒、访客通知等）：
+
+- `notify` 补齐送达确认：新增上行 `notify_result`（`outcome` + `duration_ms`）与可选 `id` 对账；
+  修复原先无条件回 `success=true` 的回执语义。
+- 新增下行 `abort_notify`：远程取消正在播放的播报。
+- 本地可停止播报：播报中**屏幕双击**停止（不清预览图、不连带切主题）；BOOT 键与 IMU 姿态变化同样可停止。
+- IMU 改为触发**聆听模式**，并抑制屏幕点击/按键造成的机身抖动误触发。
+- 详见 [control-mqtt-notify-feedback.md](control-mqtt-notify-feedback.md)。
+
 ---
 
 ## 3. 测试环境
@@ -61,8 +72,8 @@
 |---|---|
 | 开发板 | Waveshare ESP32-S3-Touch-LCD-3.49 V2 |
 | 芯片 | ESP32-S3，8MB PSRAM |
-| 固件 | `2.4.2.1`，构建时间 2026-10-26 12:01 |
-| 应用大小 | `0x2eef20`（3,075,872 B） |
+| 固件 | `2.4.2.1`，首版构建 2026-10-26 12:01；下午追加播报闭环后重新构建并刷入（15:00 左右） |
+| 应用大小 | 首版 `0x2eef20`（3,075,872 B）；播报闭环版 `0x2f0040`，分区余 25% |
 | Flash 方式 | 写入 OTA_0 + OTA_1，保留 NVS/WiFi 配置 |
 | 网络 | Wi-Fi `Temi`，IP `192.168.6.76` |
 | 主协议 | 已连接小智云 MQTT |
@@ -102,7 +113,28 @@
 | 双击清图 | ✅ 真机通过 |
 | 三击切主题 | ✅ 真机通过 |
 
-### 4.3 背景图分辨率/大小矩阵
+### 4.3 远程播报闭环（下午追加）
+
+| # | 用例 | 结果 |
+|---|---|---|
+| 1 | `query_status` 新字段 | ✅ `notify_active`、`notify_id` 返回正确 |
+| 2 | 正常播报 | ✅ `outcome=finished duration=5416ms`（4.9s 音频） |
+| 3 | 播报中 `abort_notify` | ✅ `outcome=cancelled duration=2161ms` |
+| 4 | 空闲时 `abort_notify` | ✅ `success=false`，正确拒绝 |
+| 5 | 唤醒打断 | ✅ 说「你好，小威」→ `outcome=aborted duration=15424ms` → connecting → listening → speaking |
+| 6 | 播报中屏幕双击 | ✅ `event notify_stopped=double_click` + `outcome=user_stopped duration=2313ms`（37s 音频 2.3s 掐断）；无 `theme_changed` |
+| 7 | IMU 姿态触发聆听 | ✅ 空闲晃动进聆听；播报中晃动 → `motion_detected` → `outcome=user_stopped` → listening |
+| 8 | 喇叭振动是否误触发 IMU | ✅ 全程不触碰设备，`motion_detected` 0 次，完整播完 43692ms |
+| 9 | 点击抖动抑制 | ✅ 双击屏幕时机身抖动未产生 `motion_detected` |
+| 10 | 播放失败场景 | ✅ 同样上报 `notify_result`（`duration=5080 / 283ms`） |
+
+**唤醒词是「你好，小威」**（`CONFIG_CUSTOM_WAKE_WORD_DISPLAY`），不是「你好小智」——首次测用例 5
+失败就是因为说错了唤醒词。播报期间 `wake_word_running` 实测为 `true`。
+
+**排障要点**：`preview_active`（= `HasPreviewImage()`）**不等于“图片可见”**；排查点击类手势直接看串口
+`CustomLcdDisplay` 日志最快，MQTT 事件只在成功时才发，缺席无法区分“没触发”和“没操作”。
+
+### 4.4 背景图分辨率/大小矩阵
 
 测试图片来自公网占位图服务，文件本身很小，失败与文件体积无关：
 
@@ -122,7 +154,7 @@
 - 失败原因是 PNG 解码后的像素内存，不是文件大小；
 - 大图背景优先使用 JPEG，或把 PNG 控制在 800×450 以内。
 
-### 4.4 并发保护
+### 4.5 并发保护
 
 连续快速下发多条 `set_image` 时，设备返回：
 
@@ -140,7 +172,9 @@
 2. **4B 尚未完成功能对齐**：4B 板级目录已存在，但 480×480 工牌 UI、手势、IMU/RTC、电量展示仍需在 4B 上验证；4B 尚未全量构建/真机测试。
 3. **唤醒词文案**：实际命令为 `ni hao xiao wei`，运行日志中的模型文案仍显示“你好小威”（无逗号），不影响唤醒；如要求屏幕/日志严格带逗号，需要调整唤醒词模型 JSON。
 4. **OTA**：当前 fork 仍禁用实际升级执行，版本号仅用于标识；未做 OTA 升级链路验证。
-5. **手势**：双击/三击已真机验证；双击只清预览图，三击切主题，符合阶段十三设计。
+5. **手势**：双击/三击已真机验证。**播报中双击改为停止播报**（不清预览图，也不连带触发三击切主题），空闲时双击仍是清预览图、三击切主题。
+6. **IMU**：0.1g 阈值偏灵敏，已加入点击抑制（屏幕点击/按键后 700ms 忽略运动），但拿放桌面等场景仍可能误触发；可用 `set_imu false` 关闭。
+7. **唤醒词**：实测命令为 `ni hao xiao wei`，屏幕/日志文案为“你好，小威”（见第 4.3 节说明）。
 
 ---
 
@@ -159,5 +193,8 @@
 
 - 项目总览：[PROJECT_OVERVIEW.md](../PROJECT_OVERVIEW.md)
 - 控制通道协议：[control-mqtt.md](control-mqtt.md)
+- 播报闭环实施与测试：[control-mqtt-notify-feedback.md](control-mqtt-notify-feedback.md)
+- 远程播报服务设计评估：[tts-broadcast-design.md](tts-broadcast-design.md)
+- 烧录实操：[flashing.md](flashing.md)
 - 方案评估与架构：[virsical-desktop-ai-badge-architecture.md](virsical-desktop-ai-badge-architecture.md)
 - 客户版 PDF：[virsical-desktop-ai-badge-customer-brochure.pdf](virsical-desktop-ai-badge-customer-brochure.pdf)

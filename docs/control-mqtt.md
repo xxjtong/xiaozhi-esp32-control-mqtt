@@ -94,7 +94,8 @@
 | `hello` | 连接成功（含重连） | `device_id`、`status`（当前设备状态）、`version`（固件版本，取自 `esp_app_get_description`）、`ip`（可选，内网地址） |
 | `goodbye` | 主动释放连接前 | `device_id` |
 | `session_update` | 设备状态变化 | `device_id`、`status` |
-| `reply` | 每条指令处理完 | `command_type`、`success`、`device_state`、`extra`（可选） |
+| `reply` | 每条指令处理完 | `command_type`、`success`、`device_state`、`extra`（可选）、`id`（可选，回传 `notify` 下发的 id） |
+| `notify_result` | 播报离开 `notifying` 状态时 | `device_id`、`id`（可选）、`outcome`、`duration_ms`；`outcome` 取值 `finished` / `cancelled` / `user_stopped` / `aborted` / `interrupted`，见 5.3 |
 | `event` | 本地用户操作（按键/手势/姿态/唤醒） | `device_id`、`event`、`value`（可选）、`state`、`uptime_ms`、`seq` |
 
 ### 5.2 下行指令（`subscribe_topic`）
@@ -110,13 +111,45 @@
 | `set_volume` | `level`: 0–100 | 需音频 Codec | 写入 NVS 持久化 |
 | `set_brightness` | `level`: 0–100 | 需 Backlight | 持久化到 NVS |
 | `toggle_wake_word` | `enable`: bool | Idle | 开关唤醒词检测 |
-| `notify` | `audio_url`、`subtitles[]` | Idle | 远程播报（复用通知播放器） |
+| `notify` | `audio_url`、`subtitles[]`、`id`（可选） | Idle | 远程播报（复用通知播放器）。回执 `success` 表示**已接受并开始播放**，不承诺音频播放成功 |
+| `abort_notify` | — | Notifying | 取消正在进行的播报；`StopNotification()` 会清空解码与播放队列，声音立即停止。播报结束后上报 `outcome=cancelled` |
 | `set_status` | `text`、可选 `color` | 需显示 | 状态栏文本；`color` 支持颜色名（`red`/`green`/`blue`/`yellow`/`orange`/`white`/`black`/`cyan`/`purple`/`gray`）或 `#RRGGBB` |
 | `toggle_power_save` | `enable`: bool | Idle | 低功耗 / 性能模式 |
 | `set_imu` | `enable`: bool | 任意 | 开关 IMU 运动检测，持久化到 NVS `imu/enabled`；无 IMU 板型回 `success=false` |
 | `query_status` | — | 任意 | `extra` 返回 `device_state`、`battery`、`charging`、`temperature`、`ip`、`ssid`、`rssi`、`theme`、`volume`、`brightness`、`preview_active`、`wallpaper_active`、`imu_enabled`、`wake_word_running`、`mqtt_connected`（有值才带） |
 
 状态不满足时返回 `success=false`，不会静默吞掉指令。
+
+### 5.3 `notify_result` 的 outcome 判定
+
+播报离开 `notifying` 状态时由 `ControlMqtt::TrackNotificationState()` 判定并上报一次：
+
+判定顺序自上而下，命中即止：
+
+| outcome | 含义 | 触发来源 |
+|---|---|---|
+| `cancelled` | 远程取消 | 下行 `abort_notify`；播报中下发 `listen`（start / stop 都会先停播报） |
+| `user_stopped` | 本地用户停止 | 屏幕双击、BOOT 键、IMU 姿态手势 |
+| `finished` | 音频播完 | 播放完成回调（含播放失败） |
+| `aborted` | 被接管 | 唤醒词打断（状态转为 connecting / listening / speaking） |
+| `interrupted` | 被系统动作打断 | 转 activating / upgrading（如 OTA） |
+
+远程标记优先于本地标记：`listen` 在播报中会先置 `cancel_requested_` 再调 `ToggleChatState()`，
+而后者本身会标记本地停止，若顺序颠倒远程指令就会被误报成机身上的手势操作。
+
+### 5.4 本地交互与播报
+
+| 操作 | 行为 |
+|---|---|
+| 屏幕双击（播报中） | 停止播报，上报 `event` = `notify_stopped` / `value` = `double_click`，随后 `notify_result` 的 `outcome` = `user_stopped`。播报中双击**不会**清预览图，也不会连带触发三击切主题 |
+| 屏幕双击（空闲） | 维持原行为：清除远程下发的预览图 |
+| 屏幕三击 | 维持原行为：切换 light / dark 主题 |
+| BOOT 单击（播报中） | 停止播报并进入聆听，`outcome` = `user_stopped` |
+| IMU 姿态变化 | 在 Idle 与 Notifying 下触发，进入聆听模式；播报中会先停播报再进聆听，`outcome` = `user_stopped`。Listening / Speaking 下不触发，5 秒冷却 |
+| 点击抑制 | 屏幕点击与 BOOT / PWR 按键按下都会打上时间戳，IMU 在其后 700ms 内忽略运动；窗口到期后的第一拍也丢弃（其基线仍是抖动期的采样值），避免重击余振在窗后补触发 |
+
+IMU 进入聆听时用的是**设备默认模式** `GetDefaultListeningMode()`（AEC 关闭为 AutoStop，开启为
+Realtime），而不是 `StartListening()` 硬编码的 ManualStop —— 否则摇一摇唤醒后说完话不会自动停止收音。
 
 `set_status` 示例（可选颜色，省略则用当前主题色）：
 
@@ -155,17 +188,18 @@
 }
 ```
 
-### 5.3 用户行为事件（上行）
+### 5.5 用户行为事件（上行）
 
 设备把**本地用户操作**以 `type:"event"` 发布到 `reply_topic`，用于区分"远程指令"与"现场操作"：
 
 | event | value | 触发条件 |
 |---|---|---|
-| `wake_word` | — | 语音唤醒词命中（含打断说话/聆听） |
+| `wake_word` | — | 语音唤醒词命中（含打断说话/聆听/播报） |
 | `interaction` | — | 进入 Speaking 状态，即一次"用户提问 → 设备回答"的交互 |
-| `button_click` | `boot` | BOOT 键短按（开始/结束对话、配网入口） |
-| `motion_detected` | — | QMI8658 姿态变化触发（仅 Idle，5 秒冷却） |
-| `image_cleared` | `double_click` | 双击清除常驻预览图 |
+| `button_click` | `boot` | BOOT 键短按（开始/结束对话、配网入口；播报中按下会停止播报） |
+| `motion_detected` | — | QMI8658 姿态变化触发（Idle / Notifying，5 秒冷却；点击后 700ms 抑制） |
+| `notify_stopped` | `double_click` | 播报中屏幕双击停止播报 |
+| `image_cleared` | `double_click` | 双击清除常驻预览图（仅空闲时；播报中双击改为停播报） |
 | `theme_changed` | `light` / `dark` | 三击切换主题 |
 
 示例：
@@ -418,6 +452,56 @@ abort (idle)     -> success=false       （此前误报成功）
 
 暂未整体升级到 v2.5.2，因此 MCP 错误码/`max_length`、C++ 异常关闭、`NetworkResult`、epd 公共类等架构改动未合入。
 
+### 阶段十五：播报闭环反馈（notify 可观测性）
+
+配合《[远程语音播报服务设计评估](./tts-broadcast-design.md)》方案二，把 `notify` 从开环改造成
+服务端可观测的闭环。改动只落在 `control_mqtt.h` / `control_mqtt.cc`，未触及 `notify/`、
+`protocols/`、`application.cc` 与 `Mqtt` 接口。详见
+《[第二路 MQTT 改造方案：播报闭环反馈](./control-mqtt-notify-feedback.md)》。
+
+| 变更 | 说明 |
+|---|---|
+| `notify` 回执语义修复 | 原先在 `StartNotification()` 后**无条件**回 `success=true`；现改为复查设备状态是否为 `notifying`（`StartNotification` 内部同步进入该状态），非 Idle 或忙碌时正确回 `false` |
+| `notify` 支持可选 `id` | 在 `reply` 与 `notify_result` 中原样回传，供服务端对账 |
+| 新增下行指令 `abort_notify` | 经 public 的 `Application::StopListening()` 间接触发 `StopNotification()`（后者是 private）；仅 `notifying` 下成功 |
+| 新增上行消息 `notify_result` | 字段 `id`、`outcome`、`duration_ms`；`outcome` 取值 `finished` / `cancelled` / `user_stopped` / `aborted` / `interrupted` |
+| `query_status` 增加字段 | `notify_active`、`notify_id` |
+
+实现要点：
+
+- `BroadcastState()` 内新增 `TrackNotificationState()`，用 `last_state_` 检测离开 `notifying` 的迁移
+- 主动取消与自然结束的迁移完全相同（`notifying → idle`），故用 `cancel_requested_` 标志区分出 `cancelled`
+- `TrackNotificationState()` 无论 broker 是否在线都执行；`SendNotifyResult()` 在未连接时提前返回，保持"离线丢弃"约定
+- 因 `BroadcastState()` 仅在链路在线时被调用（`application.cc`），`SendHello()` 开头会清空播报簿记，避免断连后重连时误报 `notify_result`
+- `abort_notify` 通过 `StopListening()` 异步生效，回执的 `device_state` 仍是 `notifying`；服务端以 `notify_result` 为准
+
+编译验证（ESP-IDF v6.0.2，目标 `waveshare/esp32-s3-touch-lcd-3.49-v2`）：无 error 无 warning，
+`xiaozhi.bin` 为 `0x2efbe0`，分区剩余 25%（改动前 `0x2eef20`，增大 3264 字节）。
+
+### 阶段十六：本地手势停止播报与 IMU 触发聆听
+
+在阶段十五的闭环之上，让**设备侧**也能主动停止播报，并让 IMU 姿态变化进入聆听模式。
+改动落在 `application.{h,cc}` 与 3.49-v2 板级，详见
+《[播报闭环反馈](./control-mqtt-notify-feedback.md)》。
+
+| 变更 | 说明 |
+|---|---|
+| 播报中屏幕双击停止 | `custom_lcd_display.cc`：`click_streak_==2` 且 notifying 时停播报；**不清预览图、不连带切主题**（消费 streak），上报 `event notify_stopped` |
+| BOOT 键停止播报 | `HandleToggleChatEvent()` / `HandleStartListeningEvent()` 的 notifying 分支改调 `StopNotificationByUser()` |
+| IMU 改为触发聆听 | `imu_monitor.h` 由 `ToggleChatState()` 改为 `StartListening()` 并放宽到 Idle + Notifying |
+| 点击抖动抑制 | `ImuMonitor::NotifyUserInteraction()` 由屏幕点击与 BOOT / PWR 按键调用，其后 700ms 忽略运动，窗后第一拍也丢弃 |
+| `Application` 新增接口 | `StopNotificationByUser()`（主线程专用）、`StartListening(ListeningMode)` 重载、`GetDefaultListeningMode()` 转 public |
+
+实现要点：
+
+- 停止播报必须**先标记再改状态**：直接让状态转到 idle 会被判成 `finished`（37s 音频播 3s 却报"播完"）
+- 本地停止走 `ControlMqtt::MarkNotificationUserStopped()`（`user_stopped_`）；两个标记都在 `SendHello()` 与 `HandleNotify()` 复位
+- 远程标记**优先于**本地标记：播报中下发 `listen` 会先置 `cancel_requested_`，否则会被误报成机身手势
+- `StopNotificationByUser()` / `StartListening()` 的调用顺序不可颠倒（事件位先于 `Schedule` 处理）
+- IMU 用设备默认聆听模式，避免 `StartListening()` 硬编码 ManualStop 导致说完不自动停
+
+编译验证：加入本地停止手势后 `xiaozhi.bin` 为 `0x2eff80`；第二轮复查修复后为 `0x2f0040`，分区剩余 25%。
+
 ## 8. 构建与验证
 
 ```sh
@@ -428,9 +512,11 @@ idf.py build
 当前结果（`waveshare/esp32-s3-touch-lcd-3.49-v2`，ESP-IDF v6.0.2；目标 4B 尚未做全量构建/硬件验证）：
 
 ```
-xiaozhi.bin binary size 0x2eef20 bytes.
-Smallest app partition is 0x3f0000 bytes. 0x1010e0 bytes (25.5%) free.
+xiaozhi.bin binary size 0x2f0040 bytes.
+Smallest app partition is 0x3f0000 bytes. 0xfffc0 bytes (25%) free.
 ```
+
+（含阶段十五 + 阶段十六；阶段十六之前为 `0x2efbe0`。）
 
 已验证：
 
@@ -438,14 +524,16 @@ Smallest app partition is 0x3f0000 bytes. 0x1010e0 bytes (25.5%) free.
 - broker 联通性与认证（CONNACK 0）
 - 真机全量指令回归（见阶段六）：音量/亮度/省电经串口日志确认生效，主题/图片/会话控制在真机上验证通过
 - 断网重连、重启后自动上线（`hello` 恢复）
+- 阶段十三：双击清图 / 三击切主题 / `set_imu` 开关 / `query_status` 新诊断字段，真机通过
+- 阶段十五 + 十六：播报闭环 10 项用例全部通过，见
+  《[播报闭环反馈](./control-mqtt-notify-feedback.md)》§7.1
 
 尚未验证（需现场目视/试听或对端配合）：
 
 1. `set_image` 的屏幕实际观感（缩放、色彩）
-2. `set_status` 的文字显示、`toggle_wake_word` 的唤醒行为
-3. `mcp` 在 Idle 下是否真正送达（依赖协议通道是否保持）
-4. 图片解码期间音频播放是否仍流畅（JPEG 解码在独立任务，理论不影响）
-5. 阶段十三改动：双击清图 / 三击切主题的实际手感、JPEG 壁纸显示、`set_imu` 开关、`query_status` 新诊断字段
+2. `mcp` 在 Idle 下是否真正送达（依赖协议通道是否保持）
+3. 图片解码期间音频播放是否仍流畅（JPEG 解码在独立任务，理论不影响）
+4. 4B 板型的全量构建与真机验证（手势 / IMU / RTC / 工牌 UI 尚未对齐）
 
 ## 9. 已知限制
 
@@ -453,8 +541,10 @@ Smallest app partition is 0x3f0000 bytes. 0x1010e0 bytes (25.5%) free.
 - `set_image` 的图片会常驻屏幕，直到被新图替换、`{"clear":true}` 清除，或设备重新渲染 UI；`EmoteDisplay` / `OttoEmojiDisplay` 未覆写 `CancelPreviewTimeout()`，仍沿用各自行为
 - `set_image` 的 `mode=background` 支持 JPEG/PNG；PNG 需要额外的 ARGB8888 解码缓冲，1MP 级 PNG 可能因 PSRAM 不足回 `success=false`，壁纸建议控制在 512px 左右
 - `set_image` 有硬性上限：文件 ≤4MB、分辨率 ≤1280×1280 且 ≤100 万像素；超限直接回 `success=false`，无法通过配置调整
-- IMU 运动检测阈值固定 0.1g，静止放置偶发误触发；可用 `set_imu` 关闭，重启后仍保持 NVS 中的开关状态
-- `notify` 回复在播放真正开始前就返回成功（播放失败通过日志体现）
+- IMU 运动检测阈值固定 0.1g，静止放置偶发误触发；屏幕点击与按键按下会打时间戳、其后 700ms 忽略运动（抑制点击抖动），但拿放桌面等场景仍可能误触发；可用 `set_imu` 关闭，重启后仍保持 NVS 中的开关状态
+- `notify` 的 `audio_url` 必须是不跳转的直链；跨网段/高 RTT 链路出现过首包超时（`kHttpTimeoutMs = 5000`），生产环境音频应放同网段或公网 CDN
+- `notify` 回复在播放真正开始前就返回成功（**只表示已接受并开始播放**）；播放是否成功以 `notify_result` 为准
+- `notify_result` 为 QoS 0 尽力而为，离线期间不补发；服务端需自行做超时兜底
 - `play_sound` 已移除：上游只能按 OGG 字节播放，没有「按名字播音效」的接口
 - 明文 MQTT（非 8883 端口）不加密，凭据在网络上可见；生产环境建议换 8883 + TLS 或使用内网链路
 - Kconfig 中的默认凭据会随源码分发，公开仓库前应清空并改由 NVS 注入

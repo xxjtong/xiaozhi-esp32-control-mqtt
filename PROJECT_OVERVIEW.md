@@ -190,9 +190,9 @@ xiaozhi-esp32-main/
 | 屏幕 | AXS15231B QSPI，物理 172×640，旋转后可用区域 **640×172** 横条屏 |
 | 音频 | ES8311 + ES7210，本板开启 `CONFIG_USE_DEVICE_AEC=y` |
 | IO 扩展 | TCA9554（背光/功放使能等） |
-| IMU | 运动检测触发 `ToggleChatState()` 并上报 `motion_detected`，可用 `set_imu` 关闭 |
+| IMU | 运动检测在 **Idle / Notifying** 下触发聆听（`StartListening()` + 设备默认模式）并上报 `motion_detected`；播报中先停播报再进聆听。5 秒冷却；屏幕点击与 BOOT/PWR 按键会打时间戳，其后 700ms 忽略运动（避免点击抖动误触发）。可用 `set_imu` 关闭 |
 | 电池 | ADC1_CH3 (GPIO4)，200kΩ/100kΩ 3:1 分压采样 |
-| 触摸 | 双击清预览图（`image_cleared`），三击切主题（`theme_changed`） |
+| 触摸 | 空闲时：双击清预览图（`image_cleared`），三击切主题（`theme_changed`）；**播报中双击 = 停止播报**（`notify_stopped`），不清图也不切主题 |
 | 唤醒词 | **“你好，小威”**（当前测试板配置；4B 已同步同一组配置） |
 
 代码：[main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/](main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/)（含 `custom_lcd_display.cc`、`imu_monitor.h`）。
@@ -222,11 +222,12 @@ xiaozhi-esp32-main/
 | `set_volume` | 设置音量 | `volume: 0-100` | — |
 | `set_brightness` | 设置背光 | `brightness: 0-100` | — |
 | `toggle_wake_word` | 开关唤醒词 | — | — |
-| `notify` | 播放提示音/通知 | — | 仅 Idle |
+| `notify` | 远程语音播报 | `audio_url`（单声道 Ogg Opus 直链）、`subtitles[]`（可选）、`id`（可选，对账用） | 仅 Idle；回执 `success` 表示**已接受并开始播放** |
+| `abort_notify` | 取消正在播报的音频 | — | 仅 Notifying；清空解码/播放队列立即静音，结束后上报 `outcome=cancelled` |
 | `set_status` | 状态栏文字（可滚动） | `text`，可选 `color`（色名或 `#RRGGBB`） | — |
 | `toggle_power_save` | 切换省电模式 | — | — |
 | `set_imu` | 开关 IMU 运动检测 | `enable: true\|false`（缺省 true） | 仅支持带 IMU 的板型；持久化到 NVS `imu/enabled` |
-| `query_status` | 查询设备状态 | — | extra 返回 `ip/ssid/rssi/battery/temperature/theme/volume/brightness/preview_active/wallpaper_active/imu_enabled/wake_word_running`（有值才带） |
+| `query_status` | 查询设备状态 | — | extra 返回 `ip/ssid/rssi/battery/temperature/theme/volume/brightness/preview_active/wallpaper_active/imu_enabled/wake_word_running/notify_active/notify_id`（有值才带） |
 
 **图片链路实现**（`HandleSetImage` → `ImageFetchTaskEntry`）：
 1. 下载任务（独立任务，栈 12KB，原子量单飞）；
@@ -240,8 +241,10 @@ xiaozhi-esp32-main/
 | type | 时机 | 关键字段 |
 |---|---|---|
 | `hello` | 连接/重连成功后 | `device_id/status/version/ip` |
-| `reply` | 每条命令的执行回执 | `command_type/success/device_state/extra` |
+| `reply` | 每条命令的执行回执 | `command_type/success/device_state/extra/id`（`id` 仅回传 `notify` 的） |
 | `goodbye` | 停用/析构前 | — |
+| `session_update` | 设备状态变化 | `device_id/status` |
+| `notify_result` | 播报离开 `notifying` 状态时（一次） | `device_id/id/outcome/duration_ms`；`outcome` 见 [control-mqtt.md](docs/control-mqtt.md) §5.3 |
 | `event` | 本地用户行为 | `device_id/event/value/state/uptime_ms/seq` |
 
 **用户行为事件表**（QoS 0 尽力而为，`seq` 单调递增，只含元数据不含音频/文本内容）：
@@ -251,8 +254,9 @@ xiaozhi-esp32-main/
 | `wake_word` | 唤醒词命中 | `HandleWakeWordDetectedEvent` 入口 |
 | `interaction` | 一轮人机交互（进入 Speaking 计一次） | 状态机监听器 `old!=Speaking && new==Speaking` |
 | `button_click` | BOOT 按键单击 | 板级 `boot_button_.OnClick` |
-| `motion_detected` | IMU 检测到姿态变化 | `imu_monitor.h` |
-| `image_cleared` | 双击清除常驻预览图 | `custom_lcd_display.cc` |
+| `motion_detected` | IMU 检测到姿态变化（Idle / Notifying 下触发聆听） | `imu_monitor.h` |
+| `notify_stopped` | 本地手势停止播报（屏幕双击 / BOOT 键） | `custom_lcd_display.cc`（value=`double_click`） |
+| `image_cleared` | 双击清除常驻预览图（仅空闲时） | `custom_lcd_display.cc` |
 | `theme_changed` | 三击切换主题 | `custom_lcd_display.cc`，value=新主题名 |
 
 ### 5.5 网络信息上报
@@ -306,7 +310,9 @@ python3 -m unittest discover -s scripts/tests -v                         # host 
 ### 7.3 烧录（本 fork 实测路径）
 
 - 串口：`/dev/cu.usbmodem1101`（macOS，注意用 `cu.` 而非 `tty.`）；
-- 可直接 `idf.py -p /dev/cu.usbmodem1101 flash monitor`，或在 python 环境不一致时改用 esptool 命令行按 `@flash_args` 烧录。
+- 可直接 `idf.py -p /dev/cu.usbmodem1101 flash monitor`，或在 python 环境不一致时改用 esptool 命令行按 `@flash_args` 烧录；
+- **应用分区偏移是 `0x20000`**（不是常见的 `0x10000`），assets 在 `0x800000`；只刷 app 可保留 NVS/WiFi 配置。
+  完整偏移表、命令与坑位见 [docs/flashing.md](docs/flashing.md)。
 
 ### 7.4 控制通道配置
 
@@ -342,10 +348,26 @@ cmd: set_image{url, mode?} → 下载任务（头部预检：≤4MB；解码预�
   → mode=preview（默认）：80% 屏宽缩放浮层显示（可拖动、常驻；小图不放大）
   → mode=background：JPEG/PNG（PNG 先解为 ARGB8888），cover 居中裁剪铺满全屏 → 写入 light/dark 主题的
     background_image（LvglTheme 机制）→ SetTheme 重绘 container_ 底层
-双击屏幕 → 清预览图（上报 image_cleared；壁纸保留）
+双击屏幕 → 清预览图（上报 image_cleared；壁纸保留）—— 播报中则改为停止播报，见 8.4
 三击屏幕 → 切主题（上报 theme_changed）
 {"clear":true} → 同时清预览与壁纸
 ```
+
+### 8.4 远程语音播报（`notify`）
+
+```
+cmd: notify{audio_url, subtitles?, id?} → 仅 Idle 受理 → 进入 Notifying
+  → NotifyPlayer: HTTP 增量下载 → Ogg 解复用 → 共享解码队列 → 播放
+  → 离开 Notifying 时上报一次 notify_result{id, outcome, duration_ms}
+```
+
+`outcome` 判定顺序（命中即止）：`cancelled`（远程 `abort_notify` / 播报中下发 `listen`）
+> `user_stopped`（屏幕双击 / BOOT 键 / IMU 手势）> `finished` > `aborted`（唤醒词打断）
+> `interrupted`（OTA 等系统动作）。
+
+停止播报的四种途径都走同一套簿记：`ControlMqtt::TrackNotificationState()` 在状态迁移时判定，
+因此**任何"先停播报再切状态"的路径都只上报最终状态**——例如唤醒打断是 notifying→connecting
+（中间的 idle 被合并），判 `aborted` 而非 `finished`。
 
 ---
 
@@ -370,6 +392,9 @@ cmd: set_image{url, mode?} → 下载任务（头部预检：≤4MB；解码预�
 | [AGENTS.md](AGENTS.md) | 工程规则（必读） |
 | [README_zh.md](README_zh.md) | 上游项目总览与快速开始 |
 | [docs/control-mqtt.md](docs/control-mqtt.md) | ★ 第二路 MQTT 控制通道完整协议（命令/事件/图片规格/阶段记录） |
+| [docs/control-mqtt-notify-feedback.md](docs/control-mqtt-notify-feedback.md) | ★ 播报闭环反馈实施方案 + 10 项真机测试记录与复查结论 |
+| [docs/tts-broadcast-design.md](docs/tts-broadcast-design.md) | 远程语音播报服务设计评估（服务端 TTS + 直链下发） |
+| [docs/flashing.md](docs/flashing.md) | 3.49 V2 烧录实操（偏移表/命令/注意事项/厂家文档） |
 | [docs/virsical-desktop-ai-badge-architecture.md](docs/virsical-desktop-ai-badge-architecture.md) | ★ 威思客桌面 AI 助理 / 电子工牌方案评估与系统架构（含汇报 PPT/PDF） |
 | [docs/virsical-release-2.4.2.1-2026-10-26.md](docs/virsical-release-2.4.2.1-2026-10-26.md) | ★ 2.4.2.1 版本策略、2026-10-26 需求与真机测试记录 |
 | [docs/websocket.md](docs/websocket.md) / [docs/mqtt-udp.md](docs/mqtt-udp.md) | 主协议两种传输 |
@@ -389,7 +414,8 @@ cmd: set_image{url, mode?} → 下载任务（头部预检：≤4MB；解码预�
 - `interaction` 事件以"进入 Speaking"计数，服务端拆分 TTS 时可能多计；
 - 聆听→待机由服务端 goodbye 驱动，设备无本地静音超时兜底；
 - host 测试存在 1 项失败：板级 `config.json` 的 `CONFIG_SR_WN_...=n` 触发上游「唤醒词不得写在板级配置」断言，跑 unittest/CI 会红，本地 `build.py` 不受影响；
-- IMU 运动检测灵敏度偏高（0.1g 阈值），静态放置偶发误触发；调试时可用 `{"type":"set_imu","enable":false}` 关闭（持久化到 NVS `imu/enabled`）；
+- IMU 运动检测灵敏度偏高（0.1g 阈值），静态放置偶发误触发；屏幕点击与按键按下会打时间戳、其后 700ms 忽略运动（抑制点击机身抖动），但仍无法区分"用户拿起来晃动"和"桌面被碰了一下"；调试时可用 `{"type":"set_imu","enable":false}` 关闭（持久化到 NVS `imu/enabled`）；
+- `notify` 的音频 URL 必须是不跳转的直链，`http://` 与 `https://` 均可；跨网段/高 RTT 链路出现过首包超时（5s 超时），生产环境音频应放同网段或公网 CDN；
 - 控制通道事件为 QoS 0，设备离线期间的事件不补发；
 - `PROJECT_VER` 为 **`2.4.2.1`**（上游基础版本 `2.4.2` + fork 修订号 `.1`，数字后缀保证 OTA 版本解析兼容）；2026-10-25 只合入上游 v2.5.2 的部分局部修复（阶段十四），不是完整升级，MCP 错误码/`max_length`、C++ 异常关闭、`NetworkResult`、epd 公共类等未合入；
 - 4B 板级目录已有，但 fork 的 480×480 工牌 UI、手势、IMU/RTC UI 尚未对齐（一期不做电量 UI）；当前构建/验证仍以 3.49 为主；4B 的 `config.json` 已同步“你好，小威”唤醒词配置，尚未做 4B 全量构建/真机验证。
@@ -420,3 +446,32 @@ cmd: set_image{url, mode?} → 下载任务（头部预检：≤4MB；解码预�
 - 真机验证通过：双击清图、三击切主题、IMU 开关、主题切换、状态提示、JPEG/PNG 临时预览、JPEG 背景、PNG 背景。
 - 图片实测：JPEG 1280×720 背景成功；PNG 800×450 成功，PNG 1024×576/1200×800 失败（文件很小，判断为解码像素内存问题）。
 - 详细需求、测试矩阵和已知问题见 [docs/virsical-release-2.4.2.1-2026-10-26.md](docs/virsical-release-2.4.2.1-2026-10-26.md)。
+
+---
+
+## 14. 2026-10-26（下午）：播报闭环反馈与本地停止手势
+
+面向"服务平台下发语音播报"场景，补齐送达确认与本地停止能力。改动集中在 `control_mqtt.{h,cc}`、
+`application.{h,cc}` 与 3.49-v2 板级，未触碰 `notify/`、`protocols/` 与主协议。
+
+**设备侧增量**
+
+| 增量 | 说明 |
+|---|---|
+| `notify` 回执语义修复 + 可选 `id` | 原先无条件回 `success=true`；现复查是否真的进入 `notifying`，`id` 回传用于对账 |
+| 新增上行 `notify_result` | `outcome`（`finished`/`cancelled`/`user_stopped`/`aborted`/`interrupted`）+ `duration_ms`，服务端不必再靠时长猜结果 |
+| 新增下行 `abort_notify` | 远程取消播报，清空解码与播放队列立即静音 |
+| `query_status` 增加字段 | `notify_active`、`notify_id` |
+| 本地手势停止播报 | 播报中**屏幕双击**停止（不清图、不连带切主题）；BOOT 键与 IMU 姿态变化同样可停止，统一上报 `outcome=user_stopped` |
+| IMU 改为触发聆听 | 由 `ToggleChatState()` 改为 `StartListening(GetDefaultListeningMode())`；触发状态由「仅 Idle」放宽到「Idle + Notifying」 |
+| 点击抖动抑制 | `ImuMonitor::NotifyUserInteraction()`：屏幕点击与 BOOT/PWR 按键打时间戳，其后 700ms 忽略运动；窗后第一拍也丢弃 |
+| `Application` 新增接口 | `StopNotificationByUser()`（主线程专用）、`StartListening(ListeningMode)` 重载 |
+
+**两个易踩的设计约束**（详见 [docs/control-mqtt-notify-feedback.md](docs/control-mqtt-notify-feedback.md)）：
+
+1. 停止播报必须**先标记再改状态**：直接让状态转到 idle 会被判成 `finished`（37s 音频播 3s 却报"播完"）。
+2. 远程标记**优先于**本地标记：播报中下发 `listen` 会同时命中两条路径，若顺序颠倒会被误报成机身手势。
+
+**真机验证**：10 项用例全部通过（正常播报 / 远程取消 / 空闲取消 / 唤醒打断 / 双击停播报 / IMU 触发聆听 /
+喇叭不误触发 / 双击清图 / 点击抖动抑制 / 失败场景）。固件 `xiaozhi.bin` = `0x2f0040`，分区余 25%。
+唤醒词为「**你好，小威**」（非「你好小智」），首次测唤醒打断失败就是因为说错了唤醒词。
