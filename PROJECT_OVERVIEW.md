@@ -19,7 +19,7 @@
 
 | 主线 | 内容 | 关键代码/文档 |
 |---|---|---|
-| **硬件适配** | 适配 Waveshare ESP32-S3-Touch-LCD-3.49 **V2** 开发板（3.49" 条形触摸屏 + IMU + 电池） | [main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/](main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/) |
+| **硬件适配** | **目标产品** Waveshare ESP32-S3-Touch-LCD-4B（4" 480×480 方形屏 + IMU/RTC；一期固定 5V 供电，不用电池）；**当前测试** 3.49 V2（3.49" 172×640 条形屏） | [4B](main/boards/waveshare/esp32-s3-touch-lcd-4b/) · [3.49 V2](main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/) |
 | **第二路 MQTT 控制平面** | 在官方语音协议之外，新增一条独立的 MQTT 通道，实现远程控制（发文字/图片/主题/音量等）与本地用户行为事件上报 | [main/control_mqtt.cc](main/control_mqtt.cc) · [docs/control-mqtt.md](docs/control-mqtt.md) |
 
 ### 1.3 快速事实卡
@@ -28,9 +28,9 @@
 |---|---|
 | 语言/框架 | C/C++，ESP-IDF v6.0.2 |
 | 支持芯片 | ESP32 / S2 / S3 / C2 / C3 / C5 / C6 / P4（见 `sdkconfig.defaults.*`） |
-| 板级支持 | `main/boards/` 下 46 个板级目录，本 fork 实际使用 `waveshare/esp32-s3-touch-lcd-3.49-v2` |
+| 板级支持 | `main/boards/` 下 46 个板级目录；目标 `waveshare/esp32-s3-touch-lcd-4b`（480×480），当前测试 `waveshare/esp32-s3-touch-lcd-3.49-v2`（172×640） |
 | 构建入口 | `python3 scripts/build.py <board> --name <variant>` |
-| 主协议服务端 | xiaozhi.me（OTA 分配，MQTT+UDP 或 WebSocket 二选一） |
+| 主协议服务端 | 小智云（默认 SaaS，OTA 分配 MQTT+UDP/WebSocket；已支持私有化，未来可与企业服务端合并） |
 | 控制通道 broker | 第二路 MQTT（独立于主协议，Kconfig 默认 `mqtt.virsical.cn:21883`，可用 NVS 覆盖） |
 | 代码仓库 | https://github.com/xxjtong/xiaozhi-esp32-control-mqtt |
 
@@ -107,7 +107,8 @@ xiaozhi-esp32-main/
 │   ├── system_info.cc/h       # MAC/UUID/版本信息
 │   ├── boards/                # 板级实现（46 个目录）
 │   │   ├── common/            #   Board 基类、WifiBoard、编解码、显示辅助等
-│   │   └── waveshare/esp32-s3-touch-lcd-3.49-v2/  # ★ 本 fork 目标板
+│   │   ├── waveshare/esp32-s3-touch-lcd-4b/      # ★ 目标产品（4" 480×480）
+│   │   └── waveshare/esp32-s3-touch-lcd-3.49-v2/  # 当前测试板（172×640）
 │   ├── assets/                # 字体、语言包、分区资源
 │   └── Kconfig.projbuild      # 板型/功能配置菜单
 ├── docs/                      # 协议与开发文档（见第 10 节索引）
@@ -135,7 +136,7 @@ xiaozhi-esp32-main/
 
 - `AudioService`：统一调度采集、播放、唤醒词、VAD、Opus 编解码。
 - 链路：麦克风 → AFE（AEC/NS/VAD）→ 16k PCM → Opus（60ms VBR + DTX）→ 主协议上传；下行 TTS 音流反向播放。
-- 唤醒词：WakeNet 内置模型或自定义唤醒词（本 fork 配置了自定义唤醒词，见 5.1）。
+- 唤醒词：WakeNet 内置模型或自定义唤醒词；本 fork 使用 **“你好，小威”**（见 5.1）。
 - 关键约束：**不得阻塞音频任务、不得在音频路径反复大块分配内存**。
 
 ### 4.3 协议层（[main/protocols/](main/protocols/)）
@@ -166,20 +167,37 @@ xiaozhi-esp32-main/
 
 ## 5. 本 fork 定制实现详解
 
-### 5.1 目标板：Waveshare ESP32-S3-Touch-LCD-3.49 V2
+### 5.1 硬件基线：目标 4B，当前测试 3.49
+
+**目标产品：Waveshare ESP32-S3-Touch-LCD-4B**
 
 | 硬件 | 说明 |
 |---|---|
-| 屏幕 | AXS15231B QSPI，物理 172×640，`DISPLAY_ROTATION_90` + `lv_display_set_rotation(270)` → 可用区域 **640×172** 横条屏 |
-| 音频 | ES8311（DAC）+ ES7210（ADC），本板开启 `CONFIG_USE_DEVICE_AEC=y`（回声消除，Realtime 连续聆听模式） |
+| 屏幕 | 4" 方形 IPS，480×480，RGB ST7701，GT911 电容触摸 |
+| 音频 | ES8311（DAC）+ ES7210（ADC），双麦，8Ω 2W 扬声器，`CONFIG_USE_DEVICE_AEC=y` |
+| 电源 | USB-C 5V 固定外接；板上 AXP2101 + 锂电接口保留，一期不做电池/电量 UI |
+| IMU / RTC | QMI8658 / PCF85063（与 3.49 同型号） |
+| 存储 | ESP32-S3R8，16MB Flash，8MB PSRAM |
+| 唤醒词 | **“你好，小威”**（`ni hao xiao wei`，自定义 WakeNet/MultiNet 配置） |
+| 代码 | [main/boards/waveshare/esp32-s3-touch-lcd-4b/](main/boards/waveshare/esp32-s3-touch-lcd-4b/) |
+
+> 4B 板级目录已存在，但当前使用通用 `LcdDisplay`；fork 的 480×480 工牌 UI、双击/三击手势、公司 logo、IMU/RTC 监控仍需对齐（一期不做电量 UI）。控制通道、设备 MCP、音频链路与板级无关，可先在 3.49 上验证。
+
+**当前测试：Waveshare ESP32-S3-Touch-LCD-3.49 V2**
+
+| 硬件 | 说明 |
+|---|---|
+| 屏幕 | AXS15231B QSPI，物理 172×640，旋转后可用区域 **640×172** 横条屏 |
+| 音频 | ES8311 + ES7210，本板开启 `CONFIG_USE_DEVICE_AEC=y` |
 | IO 扩展 | TCA9554（背光/功放使能等） |
-| IMU | 运动检测：状态改变视为用户行为，触发 `ToggleChatState()` 并上报 `motion_detected` 事件；可用 `set_imu` 运行时关闭 |
+| IMU | 运动检测触发 `ToggleChatState()` 并上报 `motion_detected`，可用 `set_imu` 关闭 |
 | 电池 | ADC1_CH3 (GPIO4)，200kΩ/100kΩ 3:1 分压采样 |
-| 触摸 | 双击清除常驻预览图（上报 `image_cleared`），三击切换明暗主题（上报 `theme_changed`） |
+| 触摸 | 双击清预览图（`image_cleared`），三击切主题（`theme_changed`） |
+| 唤醒词 | **“你好，小威”**（当前测试板配置；4B 已同步同一组配置） |
 
 代码：[main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/](main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/)（含 `custom_lcd_display.cc`、`imu_monitor.h`）。
 
-> 关键经验：LVGL 布局必须用 `LV_HOR_RES/LV_VER_RES`（640×172）而非面板原始 `width_/height_`（172×640），否则旋转后 UI 错位。
+> 迁移影响：3.49 的 640×172 条形 UI **不能直接复用到 480×480 方形屏**；4B 需要单独设计工牌卡片布局，并在试点前完成手势/IMU/RTC/电量对齐。3.49 继续作为音频、控制通道和固件基线测试板。
 
 ### 5.2 控制通道生命周期（[main/control_mqtt.cc](main/control_mqtt.cc)）
 
@@ -276,8 +294,10 @@ idf.py --version
 
 ```sh
 python3 scripts/build.py --list-boards                                   # 查看板型名
+python3 scripts/build.py waveshare/esp32-s3-touch-lcd-4b \
+        --name esp32-s3-touch-lcd-4b                                     # 目标产品（4" 480×480）
 python3 scripts/build.py waveshare/esp32-s3-touch-lcd-3.49-v2 \
-        --name esp32-s3-touch-lcd-3.49-v2                                # 构建本 fork 目标板
+        --name esp32-s3-touch-lcd-3.49-v2                                # 当前测试/固件基线（172×640）
 python3 -m unittest discover -s scripts/tests -v                         # host 侧测试
 ```
 
@@ -350,6 +370,8 @@ cmd: set_image{url, mode?} → 下载任务（头部预检：≤4MB；解码预�
 | [AGENTS.md](AGENTS.md) | 工程规则（必读） |
 | [README_zh.md](README_zh.md) | 上游项目总览与快速开始 |
 | [docs/control-mqtt.md](docs/control-mqtt.md) | ★ 第二路 MQTT 控制通道完整协议（命令/事件/图片规格/阶段记录） |
+| [docs/virsical-desktop-ai-badge-architecture.md](docs/virsical-desktop-ai-badge-architecture.md) | ★ 威思客桌面 AI 助理 / 电子工牌方案评估与系统架构（含汇报 PPT/PDF） |
+| [docs/virsical-release-2.4.2.1-2026-10-26.md](docs/virsical-release-2.4.2.1-2026-10-26.md) | ★ 2.4.2.1 版本策略、2026-10-26 需求与真机测试记录 |
 | [docs/websocket.md](docs/websocket.md) / [docs/mqtt-udp.md](docs/mqtt-udp.md) | 主协议两种传输 |
 | [docs/mcp-protocol.md](docs/mcp-protocol.md) / [docs/mcp-usage.md](docs/mcp-usage.md) | MCP 协议与用法 |
 | [docs/custom-board.md](docs/custom-board.md) | 新板接入指南 |
@@ -363,13 +385,15 @@ cmd: set_image{url, mode?} → 下载任务（头部预检：≤4MB；解码预�
 ## 11. 已知限制与待办
 
 - OTA 升级执行已禁用（仅保留版本有效性标记），远程升级需另行恢复；
-- `set_image` 的 `mode=background` 支持 JPEG/PNG；PNG 需在显示层解为 ARGB8888 再转 RGB565，1MP 级 PNG 的内存峰值较高，解码或分配失败会回 `success=false`；
+- `set_image` 的 `mode=background` 支持 JPEG/PNG；PNG 需在显示层解为 ARGB8888 再转 RGB565，1MP 级 PNG 的内存峰值较高，解码或分配失败会回 `success=false`；2026-10-26 在 3.49 V2 实测：PNG 640×172/800×450 成功，PNG 1024×576/1200×800 失败；JPEG 640×172/1200×800/1280×720 成功。测试文件仅 2–29KB，失败来自解码像素内存而非文件大小；大图背景优先用 JPEG 或 PNG ≤800×450；
 - `interaction` 事件以"进入 Speaking"计数，服务端拆分 TTS 时可能多计；
 - 聆听→待机由服务端 goodbye 驱动，设备无本地静音超时兜底；
 - host 测试存在 1 项失败：板级 `config.json` 的 `CONFIG_SR_WN_...=n` 触发上游「唤醒词不得写在板级配置」断言，跑 unittest/CI 会红，本地 `build.py` 不受影响；
 - IMU 运动检测灵敏度偏高（0.1g 阈值），静态放置偶发误触发；调试时可用 `{"type":"set_imu","enable":false}` 关闭（持久化到 NVS `imu/enabled`）；
 - 控制通道事件为 QoS 0，设备离线期间的事件不补发；
-- `PROJECT_VER` 仍为 `2.4.2`；2026-10-25 只合入上游 v2.5.2 的部分局部修复（阶段十四），不是完整升级，MCP 错误码/`max_length`、C++ 异常关闭、`NetworkResult`、epd 公共类等未合入。
+- `PROJECT_VER` 为 **`2.4.2.1`**（上游基础版本 `2.4.2` + fork 修订号 `.1`，数字后缀保证 OTA 版本解析兼容）；2026-10-25 只合入上游 v2.5.2 的部分局部修复（阶段十四），不是完整升级，MCP 错误码/`max_length`、C++ 异常关闭、`NetworkResult`、epd 公共类等未合入；
+- 4B 板级目录已有，但 fork 的 480×480 工牌 UI、手势、IMU/RTC UI 尚未对齐（一期不做电量 UI）；当前构建/验证仍以 3.49 为主；4B 的 `config.json` 已同步“你好，小威”唤醒词配置，尚未做 4B 全量构建/真机验证。
+- 小智云支持私有化部署，当前方案仍按 SaaS 试点；私有化/与企业服务端合并属于二期/三期，需评估 GPU、运维、许可和数据合规。
 
 ---
 
@@ -381,4 +405,18 @@ cmd: set_image{url, mode?} → 下载任务（头部预检：≤4MB；解码预�
 - `query_status` 增加 `theme/volume/brightness/preview_active/wallpaper_active/imu_enabled/wake_word_running` 诊断字段。
 - 预览小图不再放大到屏宽 80%，最高保持原尺寸。
 - 路线 A 上游补丁：MQTT `SendAudio` 解锁、WebSocket `transport` 类型校验、主题短颜色保护、cJSON 自定义消息释放、OGG 末尾零长度 lace、OTA 版本非抛异常解析；详见 [docs/control-mqtt.md](docs/control-mqtt.md) 阶段十三/十四。
-- 验证：目标板应用固件重新编译/链接，`xiaozhi.bin` 为 `0x2eef20`，分区余量 25.5%；合并固件已更新；改动文件 `-Wall -Wextra` 无 warning；host 测试 66/67，唯一失败仍是板级唤醒词配置断言。
+- 硬件目标切换为 **ESP32-S3-Touch-LCD-4B**（4" 480×480 方形屏），当前继续用 3.49 V2 做固件/音频/控制基线测试；4B 的工牌 UI、手势、IMU/RTC UI 仍需对齐（一期不做电量 UI）。
+- 唤醒词统一为 **“你好，小威”**：3.49 测试板显示文案更新，4B `config.json` 补齐自定义唤醒词/MultiNet 配置（拼音 `ni hao xiao wei`）。
+- 小智云部署路径：一期 SaaS 试点，二期私有化 PoC，三期评估与企业服务端合并；合并原则见方案文档。
+- 验证：3.49 测试板应用固件重新编译/链接，`xiaozhi.bin` 为 `0x2eef20`，分区余量 25.5%；合并固件已更新；改动文件 `-Wall -Wextra` 无 warning；host 测试 66/67，唯一失败仍是板级唤醒词配置断言。
+- 2026-10-26 真机手势验证：3.49 V2 双击清图、三击切主题均通过；`query_status` 确认 `preview_active=false`、`wallpaper_active=false`、`theme=light`。
+
+---
+
+## 13. 2026-10-26：版本 2.4.2.1 与真机验证
+
+- `PROJECT_VER` 调整为 **`2.4.2.1`**：上游基础版本 `2.4.2` + fork 修订号 `.1`，数字后缀保持 OTA 版本解析兼容。
+- 3.49 V2 最新固件重新构建并刷入 OTA_0/OTA_1，保留 NVS/WiFi 配置；启动日志确认 `App version: 2.4.2.1`。
+- 真机验证通过：双击清图、三击切主题、IMU 开关、主题切换、状态提示、JPEG/PNG 临时预览、JPEG 背景、PNG 背景。
+- 图片实测：JPEG 1280×720 背景成功；PNG 800×450 成功，PNG 1024×576/1200×800 失败（文件很小，判断为解码像素内存问题）。
+- 详细需求、测试矩阵和已知问题见 [docs/virsical-release-2.4.2.1-2026-10-26.md](docs/virsical-release-2.4.2.1-2026-10-26.md)。
