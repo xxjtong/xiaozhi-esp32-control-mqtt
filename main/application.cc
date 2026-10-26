@@ -784,7 +784,15 @@ void Application::DismissAlert() {
 
 void Application::ToggleChatState() { xEventGroupSetBits(event_group_, MAIN_EVENT_TOGGLE_CHAT); }
 
-void Application::StartListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING); }
+void Application::StartListening() { StartListening(kListeningModeManualStop); }
+
+void Application::StartListening(ListeningMode mode) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_listening_mode_ = mode;
+    }
+    xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
+}
 
 void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING); }
 
@@ -792,7 +800,11 @@ void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
 
     if (state == kDeviceStateNotifying) {
-        StopNotification();
+        // A local toggle (BOOT key) stops the broadcast on purpose, so report
+        // outcome=user_stopped. A remote "listen start" also lands here, but
+        // ControlMqtt::HandleListen() pre-sets cancel_requested_, which takes
+        // precedence, so it is still reported as cancelled.
+        StopNotificationByUser();
         state = kDeviceStateIdle;
     }
 
@@ -856,7 +868,10 @@ void Application::HandleStartListeningEvent() {
     auto state = GetDeviceState();
 
     if (state == kDeviceStateNotifying) {
-        StopNotification();
+        // Every current caller is a local gesture (button / touch / IMU), so this
+        // counts as a user stop. Remote requests go through listen/abort_notify,
+        // which pre-set cancel_requested_ and outrank this flag.
+        StopNotificationByUser();
         state = kDeviceStateIdle;
     }
 
@@ -874,17 +889,24 @@ void Application::HandleStartListeningEvent() {
         return;
     }
 
+    // Use the mode StartListening() was called with (defaults to manual stop).
+    ListeningMode mode;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        mode = pending_listening_mode_;
+    }
+
     if (state == kDeviceStateIdle) {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
-            Schedule([this]() { ContinueOpenAudioChannel(kListeningModeManualStop); });
+            Schedule([this, mode]() { ContinueOpenAudioChannel(mode); });
             return;
         }
-        SetListeningMode(kListeningModeManualStop);
+        SetListeningMode(mode);
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
-        SetListeningMode(kListeningModeManualStop);
+        SetListeningMode(mode);
     }
 }
 
@@ -1164,6 +1186,19 @@ void Application::StopNotification() {
     if (GetDeviceState() == kDeviceStateNotifying) {
         SetDeviceState(kDeviceStateIdle);
     }
+}
+
+void Application::StopNotificationByUser() {
+    if (GetDeviceState() != kDeviceStateNotifying) {
+        return;
+    }
+    ESP_LOGI(TAG, "Notification stopped by user request");
+    // Let the control channel report outcome=user_stopped before the state leaves
+    // "notifying" (TrackNotificationState runs inside SetDeviceState below).
+    if (control_mqtt_ != nullptr) {
+        control_mqtt_->MarkNotificationUserStopped();
+    }
+    StopNotification();
 }
 
 void Application::HandleNotificationFinished(uint32_t playback_id, bool success) {

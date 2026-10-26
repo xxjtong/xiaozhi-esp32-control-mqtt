@@ -39,6 +39,11 @@ public:
 
     bool IsConnected() const { return connected_; }
 
+    // Called when the user stops a broadcast from the device itself (screen
+    // double-click / IMU gesture). Lets notify_result report outcome=user_stopped
+    // instead of "finished", which is what a plain transition to idle would produce.
+    void MarkNotificationUserStopped() { user_stopped_ = true; }
+
 private:
     // Read control_mqtt namespace from NVS; returns false if no endpoint configured.
     bool LoadConfig();
@@ -77,6 +82,21 @@ private:
     // Monotonic sequence for user-action events (main task only).
     uint32_t event_seq_ = 0;
 
+    // --- Notification bookkeeping (main task only) ---
+    // Last state seen through BroadcastState(), used to detect leaving "notifying".
+    std::string last_state_;
+    // Id echoed from the notify command so the server can correlate notify_result.
+    std::string notify_id_;
+    uint32_t notify_start_ms_ = 0;
+    bool notify_active_ = false;
+    // Set by abort_notify: a cancelled notification leaves the notifying state
+    // exactly like a finished one, so the flag is needed to tell them apart.
+    bool cancel_requested_ = false;
+    // Set when the user stops the broadcast locally (screen double-click, BOOT key,
+    // IMU gesture). cancel_requested_ is checked first, so a remote listen/abort that
+    // also stops playback is never misreported as an on-device gesture.
+    bool user_stopped_ = false;
+
     // --- Message dispatch ---
     void OnMessage(const std::string& topic, const std::string& payload);
     void DispatchCommand(cJSON* root);
@@ -93,6 +113,7 @@ private:
     void HandleSetBrightness(cJSON* root);
     void HandleToggleWakeWord(cJSON* root);
     void HandleNotify(cJSON* root);
+    void HandleAbortNotify(cJSON* root);
     void HandleSetStatus(cJSON* root);
     void HandleTogglePowerSave(cJSON* root);
     void HandleSetImu(cJSON* root);
@@ -106,10 +127,16 @@ private:
     void SendGoodbye();
     void SendSessionUpdate(const std::string& state_name);
 
+    // Send a notify_result broadcast when a notification leaves the notifying state.
+    void SendNotifyResult(const std::string& id, const std::string& outcome, uint32_t duration_ms);
+
+    // Track the notification lifecycle from state changes (main task only).
+    void TrackNotificationState(const std::string& state_name);
+
     // Reply to a cmd message on the reply topic.
     void SendReply(const std::string& cmd_type, bool success,
-                   const std::string& reply_topic_override = "",
-                   cJSON* extra = nullptr);
+                   const std::string& reply_topic_override = "", cJSON* extra = nullptr,
+                   const std::string& id = "");
 };
 
 #endif  // CONTROL_MQTT_H

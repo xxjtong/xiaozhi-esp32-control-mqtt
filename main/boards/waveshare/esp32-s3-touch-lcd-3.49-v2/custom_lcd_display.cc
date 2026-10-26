@@ -23,6 +23,7 @@
 #include "application.h"
 #include "device_state.h"
 #include "company_logo.h"
+#include "imu_monitor.h"
 
 #define TAG "CustomLcdDisplay"
 
@@ -242,6 +243,10 @@ void CustomLcdDisplay::OnScreenClickEvent(lv_event_t* e) {
     auto* self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
     if (self == nullptr) return;
 
+    // Touching the screen shakes the board. Stamp the interaction so the IMU does not
+    // read the tap (or the double/triple click that follows) as a posture change.
+    ImuMonitor::NotifyUserInteraction();
+
     if (self->last_click_tick_ != 0 &&
         lv_tick_elaps(self->last_click_tick_) <= CLICK_WINDOW_MS) {
         if (self->click_streak_ < 3) {
@@ -260,6 +265,32 @@ void CustomLcdDisplay::OnScreenClickEvent(lv_event_t* e) {
     self->last_click_tick_ = lv_tick_get();
 
     if (self->click_streak_ == 2) {
+        // While a broadcast is playing the double-click means "stop playing". It must
+        // not also clear the preview image, and the streak is consumed so a third tap
+        // cannot switch the theme right after stopping playback.
+        if (Application::GetInstance().GetDeviceState() == kDeviceStateNotifying) {
+            self->click_streak_ = 0;
+            self->last_click_tick_ = 0;
+            self->pending_clear_ = false;
+            self->pending_clear_target_ = nullptr;
+            if (self->click_timer_ != nullptr) {
+                lv_timer_pause(self->click_timer_);
+            }
+            ESP_LOGI(TAG, "Double-click stops notification playback");
+            // StopNotificationByUser() must run on the main task; report the event
+            // there too so the state it carries matches what really happened (the
+            // audio may have ended between the gesture and this callback).
+            Application::GetInstance().Schedule([]() {
+                auto& app = Application::GetInstance();
+                if (app.GetDeviceState() != kDeviceStateNotifying) {
+                    return;
+                }
+                app.ReportUserEvent("notify_stopped", "double_click");
+                app.StopNotificationByUser();
+            });
+            return;
+        }
+
         // Wait for the window to expire before clearing: a third click within the
         // window turns this into a triple-click and must cancel the clear.
         {

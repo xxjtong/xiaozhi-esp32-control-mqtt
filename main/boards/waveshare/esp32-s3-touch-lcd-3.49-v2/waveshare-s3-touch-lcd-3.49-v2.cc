@@ -144,6 +144,9 @@ private:
 
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
+            // Pressing the button shakes the board too; keep the IMU from reading it
+            // as a posture change (see ImuMonitor::NotifyUserInteraction).
+            ImuMonitor::NotifyUserInteraction();
             auto& app = Application::GetInstance();
             app.ReportUserEvent("button_click", "boot");
             if (app.GetDeviceState() == kDeviceStateStarting) {
@@ -180,6 +183,7 @@ private:
         });
 
         pwr_button_.OnPressUp([this]() {
+            ImuMonitor::NotifyUserInteraction();
             if(!is_PwrControlEn) {
                 is_PwrControlEn = true;
             }

@@ -69,9 +69,22 @@ public:
     void SetEnabled(bool enabled) { enabled_ = enabled; }
     bool IsEnabled() const { return enabled_.load(); }
 
+    // Tapping the screen (or pressing a button) physically shakes the board and the
+    // accelerometer sees it as a posture change. UI code calls this on every tap so a
+    // click gesture can never be mistaken for the "shake to listen" gesture.
+    static void NotifyUserInteraction() {
+        last_ui_tap_us_.store(esp_timer_get_time(), std::memory_order_relaxed);
+        tap_settle_pending_.store(true, std::memory_order_relaxed);
+    }
+
 private:
     static constexpr const char* TAG = "ImuMonitor";
     i2c_master_dev_handle_t imu_dev_ = nullptr;
+    // Timestamp of the last screen tap / button press, shared by all instances.
+    static inline std::atomic<int64_t> last_ui_tap_us_{0};
+    // Set on a tap, consumed by the first sample taken after the suppression window
+    // expires (that sample's baseline still belongs to the shake and must be dropped).
+    static inline std::atomic<bool> tap_settle_pending_{false};
 
     // 状态机：检测运动 → 触发 StartListening
     float last_mag_ = 1.0f;          // 上次加速度幅值（g），静态约 1g
@@ -79,6 +92,9 @@ private:
     std::atomic<bool> enabled_{true};
     static constexpr int64_t COOLDOWN_US = 5 * 1000 * 1000;  // 5 秒冷却
     static constexpr float MOTION_THRESHOLD = 0.1f;  // 幅值变化阈值（g），极轻微动作即触发
+    // How long a tap keeps masking motion detection. Refreshed on every tap, so a
+    // double/triple click stays masked for the whole gesture plus this tail.
+    static constexpr int64_t TAP_SUPPRESS_US = 700 * 1000;
 
     uint8_t ReadReg(uint8_t reg) {
         uint8_t val = 0;
@@ -131,9 +147,24 @@ private:
             int64_t now = esp_timer_get_time();
             if (now - last_trigger_us_ < COOLDOWN_US) continue;
 
-            // 只在 Idle 状态触发（避免打断 listening/speaking）
+            // 点击屏幕/按键造成的机身抖动不算姿态变化，窗口内忽略。
+            // 放在 last_mag_ 更新之后，抑制期间基线仍然跟随，解除后不会补触发。
+            int64_t last_tap = last_ui_tap_us_.load(std::memory_order_relaxed);
+            if (last_tap != 0) {
+                if (now - last_tap < TAP_SUPPRESS_US) {
+                    continue;
+                }
+                // 窗口刚到期的这一拍，基线仍是抖动期间的采样值，delta 不可信，丢弃。
+                // 否则一次重击的余振会在窗后补触发一次。
+                if (tap_settle_pending_.exchange(false, std::memory_order_relaxed)) {
+                    continue;
+                }
+            }
+
+            // 只在 Idle / Notifying 触发（避免打断 listening/speaking）
             auto& app = Application::GetInstance();
-            if (app.GetDeviceState() != kDeviceStateIdle) continue;
+            auto state = app.GetDeviceState();
+            if (state != kDeviceStateIdle && state != kDeviceStateNotifying) continue;
 
             // 加速度幅值变化超过阈值 → 姿态变化
             if (delta > MOTION_THRESHOLD) {
@@ -142,7 +173,14 @@ private:
                 last_trigger_us_ = now;
                 app.ReportUserEvent("motion_detected");
                 app.Schedule([]() {
-                    Application::GetInstance().ToggleChatState();
+                    auto& app = Application::GetInstance();
+                    // Stop first so notify_result reports outcome=user_stopped, then
+                    // enter listening. Both run on the main task in this order.
+                    app.StopNotificationByUser();
+                    // Keep the device's own default (auto-stop when AEC is off); the
+                    // plain StartListening() would hard-code manual stop and leave the
+                    // mic open after the user finishes speaking.
+                    app.StartListening(app.GetDefaultListeningMode());
                 });
             }
         }

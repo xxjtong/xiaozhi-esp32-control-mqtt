@@ -106,8 +106,18 @@ public:
     /**
      * Start listening (event-based, thread-safe)
      * Sends MAIN_EVENT_START_LISTENING to be handled in Run()
+     * Defaults to kListeningModeManualStop.
      */
     void StartListening();
+
+    /**
+     * Start listening with an explicit mode (event-based, thread-safe).
+     * Callers that replace a ToggleChatState() gesture should pass
+     * GetDefaultListeningMode() to keep the previous auto-stop behaviour.
+     */
+    void StartListening(ListeningMode mode);
+
+    ListeningMode GetDefaultListeningMode() const;
 
     /**
      * Stop listening (event-based, thread-safe)
@@ -125,6 +135,18 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
     void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);
+
+    /**
+     * Stop the current notification because the user asked for it (screen double-click,
+     * IMU gesture). Unlike StopListening() this also tells the control channel, so
+     * notify_result reports outcome=user_stopped instead of the misleading "finished"
+     * that a plain notifying -> idle transition would produce.
+     *
+     * Must run on the main task; callers on other tasks (LVGL, IMU) must wrap it in
+     * Application::Schedule(). No-op when no notification is playing.
+     */
+    void StopNotificationByUser();
+
     AudioService& GetAudioService() { return audio_service_; }
     
     /**
@@ -160,6 +182,8 @@ private:
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     bool pending_listening_start_ = false;  // Waiting for playback to drain before starting listening (auto mode)
+    // Mode for the next MAIN_EVENT_START_LISTENING; set by StartListening(mode).
+    ListeningMode pending_listening_mode_ = kListeningModeManualStop;
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
@@ -190,7 +214,6 @@ private:
     void InitializeProtocol();
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);
-    ListeningMode GetDefaultListeningMode() const;
     
     // State change handler called by state machine
     void OnStateChanged(DeviceState old_state, DeviceState new_state);

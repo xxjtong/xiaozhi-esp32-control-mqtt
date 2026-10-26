@@ -263,6 +263,17 @@ bool ControlMqtt::PublishJson(const std::string& topic, cJSON* root) {
 // ---------------------------------------------------------------------------
 
 void ControlMqtt::SendHello() {
+    // BroadcastState() is only invoked while the broker link is up, so a notification
+    // that ends during an outage leaves stale bookkeeping behind. Clear it on every
+    // (re)connect, otherwise the next unrelated state change would be reported as a
+    // bogus notify_result.
+    last_state_.clear();
+    notify_id_.clear();
+    notify_start_ms_ = 0;
+    notify_active_ = false;
+    cancel_requested_ = false;
+    user_stopped_ = false;
+
     const char* version = "unknown";
     auto app_desc = esp_app_get_description();
     if (app_desc != nullptr && app_desc->version[0] != '\0') {
@@ -308,8 +319,70 @@ void ControlMqtt::SendSessionUpdate(const std::string& state_name) {
     cJSON_Delete(root);
 }
 
+void ControlMqtt::SendNotifyResult(const std::string& id, const std::string& outcome,
+                                   uint32_t duration_ms) {
+    if (!connected_ || mqtt_ == nullptr || reply_topic_.empty()) {
+        return;
+    }
+    cJSON* root = cJSON_CreateObject();
+    if (root == nullptr) {
+        return;
+    }
+    cJSON_AddStringToObject(root, "type", "notify_result");
+    cJSON_AddStringToObject(root, "device_id", device_id_.c_str());
+    if (!id.empty()) {
+        cJSON_AddStringToObject(root, "id", id.c_str());
+    }
+    cJSON_AddStringToObject(root, "outcome", outcome.c_str());
+    cJSON_AddNumberToObject(root, "duration_ms", static_cast<double>(duration_ms));
+    PublishJson(reply_topic_, root);
+    cJSON_Delete(root);
+    ESP_LOGI(TAG, "notify_result: id=%s outcome=%s duration=%lu ms", id.c_str(), outcome.c_str(),
+             static_cast<unsigned long>(duration_ms));
+}
+
+void ControlMqtt::TrackNotificationState(const std::string& state_name) {
+    // Runs on the main task, before session_update is published.
+    const bool was_notifying = (last_state_ == "notifying");
+
+    if (state_name == "notifying") {
+        if (!was_notifying) {
+            notify_active_ = true;
+            notify_start_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        }
+    } else if (was_notifying) {
+        const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+        const uint32_t duration_ms = now_ms - notify_start_ms_;
+
+        // Remote requests win over the local flag: ControlMqtt::HandleListen() sets
+        // cancel_requested_ before calling ToggleChatState(), which itself reports
+        // a user stop. Without this ordering a remote "listen start" would be
+        // misreported as an on-device gesture.
+        std::string outcome = "finished";
+        if (cancel_requested_) {
+            outcome = "cancelled";  // Remote abort_notify / listen.
+        } else if (user_stopped_) {
+            outcome = "user_stopped";  // Screen double-click, BOOT key, IMU gesture.
+        } else if (state_name == "connecting" || state_name == "listening" ||
+                   state_name == "speaking") {
+            outcome = "aborted";  // A wake word took over.
+        } else if (state_name == "activating" || state_name == "upgrading") {
+            outcome = "interrupted";
+        }
+
+        notify_active_ = false;
+        cancel_requested_ = false;
+        user_stopped_ = false;
+        const std::string id = notify_id_;
+        notify_id_.clear();
+        SendNotifyResult(id, outcome, duration_ms);
+    }
+    last_state_ = state_name;
+}
+
 void ControlMqtt::BroadcastState(const std::string& state_name) {
     // Called from main thread (Application::OnStateChanged context)
+    TrackNotificationState(state_name);
     SendSessionUpdate(state_name);
 }
 
@@ -344,7 +417,8 @@ void ControlMqtt::BroadcastEvent(const std::string& event, const std::string& va
 // ---------------------------------------------------------------------------
 
 void ControlMqtt::SendReply(const std::string& cmd_type, bool success,
-                            const std::string& reply_topic_override, cJSON* extra) {
+                            const std::string& reply_topic_override, cJSON* extra,
+                            const std::string& id) {
     if (!connected_ || mqtt_ == nullptr) {
         if (extra != nullptr) {
             cJSON_Delete(extra);
@@ -357,6 +431,10 @@ void ControlMqtt::SendReply(const std::string& cmd_type, bool success,
     cJSON_AddStringToObject(root, "command_type", cmd_type.c_str());
     cJSON_AddBoolToObject(root, "success", success);
     cJSON_AddStringToObject(root, "device_state", state_str);
+    // Echo the caller-supplied id so the server can correlate this reply with a request.
+    if (!id.empty()) {
+        cJSON_AddStringToObject(root, "id", id.c_str());
+    }
     if (extra != nullptr) {
         cJSON_AddItemToObject(root, "extra", extra);
     }
@@ -447,6 +525,9 @@ void ControlMqtt::DispatchCommand(cJSON* root) {
             ESP_LOGW(TAG, "Ignoring notify: device in state %d", state);
             SendReply("notify", false);
         }
+    } else if (cmd == "abort_notify") {
+        // Safe anytime; the handler replies false when the device is not notifying.
+        HandleAbortNotify(root);
     } else if (cmd == "set_status") {
         HandleSetStatus(root);
     } else if (cmd == "toggle_power_save") {
@@ -470,6 +551,13 @@ void ControlMqtt::HandleListen(cJSON* root) {
     if (!cJSON_IsString(state_j)) {
         SendReply("listen", false);
         return;
+    }
+    // Both branches stop a running broadcast on the way to their target state.
+    // Pre-mark it as a remote cancel: HandleToggleChatEvent() /
+    // HandleStopListeningEvent() would otherwise leave notify_result reporting
+    // "finished" for an audio that never finished.
+    if (Application::GetInstance().GetDeviceState() == kDeviceStateNotifying) {
+        cancel_requested_ = true;
     }
     if (strcmp(state_j->valuestring, "start") == 0) {
         Application::GetInstance().ToggleChatState();
@@ -1020,6 +1108,13 @@ void ControlMqtt::HandleNotify(cJSON* root) {
     }
     std::string audio_url = url_j->valuestring;
 
+    // Optional correlation id; echoed back in reply and in notify_result.
+    std::string notify_id;
+    auto id_j = cJSON_GetObjectItem(root, "id");
+    if (cJSON_IsString(id_j) && id_j->valuestring[0] != '\0') {
+        notify_id = id_j->valuestring;
+    }
+
     std::vector<NotifySubtitle> subtitles;
     auto subs = cJSON_GetObjectItem(root, "subtitles");
     if (cJSON_IsArray(subs)) {
@@ -1036,8 +1131,38 @@ void ControlMqtt::HandleNotify(cJSON* root) {
         }
     }
 
+    notify_id_ = notify_id;
+    cancel_requested_ = false;
+    user_stopped_ = false;
     Application::GetInstance().StartNotification(std::move(audio_url), std::move(subtitles));
-    SendReply("notify", true);
+    // StartNotification() enters kDeviceStateNotifying synchronously when it accepts the
+    // request (it returns early when busy or not idle), so re-reading the state tells us
+    // whether playback really started. Previously this always reported success.
+    const bool accepted = Application::GetInstance().GetDeviceState() == kDeviceStateNotifying;
+    if (!accepted) {
+        ESP_LOGW(TAG, "notify not started: device did not enter notifying state");
+        notify_id_.clear();
+    }
+    SendReply("notify", accepted, "", nullptr, notify_id);
+}
+
+void ControlMqtt::HandleAbortNotify(cJSON* root) {
+    (void)root;
+    auto& app = Application::GetInstance();
+    if (app.GetDeviceState() != kDeviceStateNotifying) {
+        ESP_LOGW(TAG, "abort_notify ignored: device is not notifying");
+        SendReply("abort_notify", false);
+        return;
+    }
+    // Application::StopNotification() is private, so use the public, event-based
+    // StopListening() instead: in the notifying state its handler only calls
+    // StopNotification() and nothing else (Application::HandleStopListeningEvent).
+    // That clears both the decode and playback queues, so buffered audio is discarded
+    // rather than draining to the end. The state change lands on the next main-loop
+    // iteration, so the reply below still reports "notifying".
+    cancel_requested_ = true;
+    app.StopListening();
+    SendReply("abort_notify", true);
 }
 
 void ControlMqtt::HandleSetStatus(cJSON* root) {
@@ -1155,6 +1280,10 @@ void ControlMqtt::HandleQueryStatus(cJSON* root) {
     }
     cJSON_AddBoolToObject(extra, "wake_word_running",
                           app.GetAudioService().IsWakeWordRunning());
+    cJSON_AddBoolToObject(extra, "notify_active", notify_active_);
+    if (notify_active_ && !notify_id_.empty()) {
+        cJSON_AddStringToObject(extra, "notify_id", notify_id_.c_str());
+    }
 
     cJSON_AddBoolToObject(extra, "mqtt_connected", connected_);
     SendReply("query_status", true, "", extra);
