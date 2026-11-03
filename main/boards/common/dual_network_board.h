@@ -55,6 +55,9 @@ public:
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override;
     virtual std::string GetBoardJson() override;
     virtual std::string GetDeviceStatusJson() override;
+    virtual std::string GetIpAddress() override;
+    virtual std::string GetWifiSsid() override;
+    virtual int GetWifiRssi() override;
 };
 
 #endif // DUAL_NETWORK_BOARD_H 

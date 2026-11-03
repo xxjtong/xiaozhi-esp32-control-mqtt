@@ -62,4 +62,8 @@
 #define DISPLAY_BACKLIGHT_PIN GPIO_NUM_4
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT true
 
+// RTC（PCF85063）与 SNTP 校时共用：本项目的系统时钟约定为「本地墙钟」，
+// SNTP 同步回写系统时钟时要叠加时区偏移（与 3.49-V2 板保持一致，东八区）。
+#define RTC_TIMEZONE_OFFSET_SEC  (8 * 3600)
+
 #endif // _BOARD_CONFIG_H_

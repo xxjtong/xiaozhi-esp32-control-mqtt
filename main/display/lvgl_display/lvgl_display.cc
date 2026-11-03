@@ -158,10 +158,24 @@ void LvglDisplay::SetStatus(const char* status) {
         return;
     }
     lv_label_set_text(status_label_, status);
+    // A remote set_status may have overridden the color; restore the theme color so
+    // clocks and state strings never inherit it.
+    auto* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+    if (lvgl_theme != nullptr) {
+        lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
+    }
     lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
 
     last_status_update_time_ = std::chrono::system_clock::now();
+}
+
+void LvglDisplay::SetStatusColor(uint32_t rgb) {
+    DisplayLockGuard lock(this);
+    if (status_label_ == nullptr) {
+        return;
+    }
+    lv_obj_set_style_text_color(status_label_, lv_color_hex(rgb), 0);
 }
 
 void LvglDisplay::ShowNotification(const std::string& notification, int duration_ms) {
@@ -259,9 +273,14 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
             icon = levels[level_index];
         }
         DisplayLockGuard lock(this);
-        if (battery_label_ != nullptr && battery_icon_ != icon) {
-            battery_icon_ = icon;
-            lv_label_set_text(battery_label_, battery_icon_);
+        if (battery_label_ != nullptr) {
+            char battery_text[16];
+            snprintf(battery_text, sizeof(battery_text), "%s %d%%", icon, battery_level);
+            if (battery_icon_ != icon || battery_level != last_battery_level_) {
+                battery_icon_ = icon;
+                last_battery_level_ = battery_level;
+                lv_label_set_text(battery_label_, battery_text);
+            }
         }
 
         // Check low battery popup only when clock tick event is triggered
@@ -307,6 +326,19 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
 }
 
 void LvglDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {}
+
+void LvglDisplay::CancelPreviewTimeout() {}
+
+bool LvglDisplay::SetBackgroundImage(std::unique_ptr<LvglImage> image) {
+    (void)image;
+    return false;
+}
+
+void LvglDisplay::ClearBackgroundImage() {}
+
+bool LvglDisplay::HasPreviewImage() { return false; }
+
+bool LvglDisplay::HasBackgroundImage() { return false; }
 
 void LvglDisplay::SetPowerSaveMode(bool on) {
     if (on) {

@@ -21,6 +21,8 @@ void Display::SetPreviewImage(std::unique_ptr<LvglImage> image) {}
 
 void Display::SetStatus(const char* status) { ESP_LOGW(TAG, "SetStatus: %s", status); }
 
+void Display::SetStatusColor(uint32_t rgb) { (void)rgb; }
+
 void Display::ShowNotification(const std::string& notification, int duration_ms) {
     ShowNotification(notification.c_str(), duration_ms);
 }

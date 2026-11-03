@@ -92,3 +92,22 @@ The RPC result contains the boolean returned by the MQTT send operation:
 ```
 
 This result means that `xz-mqtt` wrote the publish message to the current online device connection. It does not confirm receipt or playback. `xz-mqtt` does not create a UDP session, start the chat bridge, proxy the Ogg file, or retain notifications for offline devices.
+
+## Fork extension (威思客定制版)
+
+This document describes the upstream protocol. This fork adds an independent second MQTT control
+channel that carries the same `notify` capability **plus** a delivery-closed loop that the upstream
+message lacks:
+
+| Addition | Purpose |
+|---|---|
+| `id` on `notify` | echoed back in the reply and in `notify_result` for server-side reconciliation |
+| `notify_result` uplink | `outcome` (`finished` / `cancelled` / `user_stopped` / `aborted` / `interrupted`) + `duration_ms`, reported once when playback leaves `Notifying` |
+| `abort_notify` downlink | cancels a running notification |
+| Local stop gestures | screen double-click, BOOT key, or an IMU posture change stops playback and reports `outcome=user_stopped` |
+
+Because `notify_result` reports the actual outcome, a server on this fork does not need the
+"infer from `duration_ms`" heuristic described above. See
+[control-mqtt.md](control-mqtt.md) for the full protocol and
+[control-mqtt-notify-feedback.md](control-mqtt-notify-feedback.md) for the implementation and
+on-device test record.

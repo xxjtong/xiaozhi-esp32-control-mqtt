@@ -89,6 +89,9 @@ void Settings::SetBool(const std::string& key, bool value) {
 }
 
 void Settings::EraseKey(const std::string& key) {
+    if (nvs_handle_ == 0) {
+        return;
+    }
     if (read_write_) {
         auto ret = nvs_erase_key(nvs_handle_, key.c_str());
         if (ret != ESP_ERR_NVS_NOT_FOUND) {
@@ -100,6 +103,9 @@ void Settings::EraseKey(const std::string& key) {
 }
 
 void Settings::EraseAll() {
+    if (nvs_handle_ == 0) {
+        return;
+    }
     if (read_write_) {
         ESP_ERROR_CHECK(nvs_erase_all(nvs_handle_));
     } else {
