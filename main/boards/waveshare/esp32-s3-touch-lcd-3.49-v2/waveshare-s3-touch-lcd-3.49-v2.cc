@@ -5,7 +5,6 @@
 #include "application.h"
 #include "button.h"
 #include "config.h"
-#include "settings.h"
 
 #include <esp_log.h>
 #include "i2c_device.h"
@@ -21,9 +20,6 @@
 #include "esp_lcd_axs15231b.h"
 
 #include "custom_lcd_display.h"
-#include "adc_battery_monitor.h"
-#include "imu_monitor.h"
-#include "rtc_monitor.h"
 
 #include <lvgl.h>
 
@@ -45,10 +41,6 @@ private:
     i2c_master_dev_handle_t disp_touch_dev_handle = NULL;
     lv_indev_t *touch_indev = NULL;    //touch
     bool is_PwrControlEn = false;
-    AdcBatteryMonitor* adc_battery_monitor_ = nullptr;
-    ImuMonitor imu_monitor_;
-    bool imu_available_ = false;
-    RtcMonitor rtc_monitor_;
 
     void InitializeI2c() {
         // Initialize I2C peripheral
@@ -83,70 +75,6 @@ private:
                                             IO_EXPANDER_PIN_NUM_7,
                                         1);
         ESP_ERROR_CHECK(ret);
-    }
-
-    // V2 相对原版的关键接线变化（见本目录 README）：
-    //   EXIO1 = 背光使能（高有效），EXIO5 = LCD 复位（高有效），背光 PWM 从 GPIO8 挪到 GPIO42。
-    // 问题：TCA9554 一旦 POR（I2C 干扰、电源瞬时跌落、ESD），输出会回到高阻态，背光使能
-    // 随之丢失；而固件只在开机流程里写过一次，运行期没有任何恢复路径。结果就是
-    // 「背光灭、屏全黑，但主控/音频/网络全部正常」，只能按 RST 重启才能恢复——
-    // 因为重启会把 EXIO1 重新写回 1。下面这个低优先级任务负责把这两路使能锁回高电平。
-    static constexpr uint32_t DISPLAY_ENABLE_MASK =
-        IO_EXPANDER_PIN_NUM_1 | IO_EXPANDER_PIN_NUM_5;
-
-    void DisplayEnableGuard() {
-        bool read_failed_logged = false;
-        bool first_read_done = false;
-        while (true) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-
-            // 背光 PWM 也只有开机/改亮度时写一次；外设被复位后占空比会丢，
-            // 而 brightness_ 软件状态仍是「正确」的，SetBrightness() 会因值未变化
-            // 直接返回，永远修不回来。这里周期性回读比对，不一致才重写并上报。
-            if (auto* backlight = GetBacklight()) {
-                backlight->ReapplyBrightness();
-            }
-
-            if (io_expander == nullptr) {
-                continue;
-            }
-            uint32_t levels = 0;
-            if (esp_io_expander_get_level(io_expander, DISPLAY_ENABLE_MASK, &levels) != ESP_OK) {
-                if (!read_failed_logged) {
-                    ESP_LOGW(TAG, "Cannot read TCA9554, display enable guard inactive");
-                    read_failed_logged = true;
-                }
-                continue;
-            }
-            read_failed_logged = false;
-            if (!first_read_done) {
-                // 首次成功回读即证明守护链路可用（任务在跑 + get_level 被驱动支持）
-                ESP_LOGI(TAG, "Display enable guard running, EXIO1/5 levels=0x%02x",
-                         (unsigned)(levels & DISPLAY_ENABLE_MASK));
-                first_read_done = true;
-            }
-            uint32_t lost = DISPLAY_ENABLE_MASK & ~levels;
-            if (lost == 0) {
-                continue;
-            }
-            ESP_LOGW(TAG, "Display enable lost: read=0x%02x lost=0x%02x, restoring",
-                     (unsigned)levels, (unsigned)lost);
-            // TCA9554 掉电后方向寄存器同样会回到输入态，只写输出寄存器不会驱动引脚，
-            // 所以先恢复方向再恢复电平，两者都要做。
-            esp_io_expander_set_dir(io_expander, DISPLAY_ENABLE_MASK, IO_EXPANDER_OUTPUT);
-            esp_io_expander_set_level(io_expander, DISPLAY_ENABLE_MASK, 1);
-        }
-    }
-
-    static void DisplayEnableGuardTrampoline(void* arg) {
-        static_cast<CustomBoard*>(arg)->DisplayEnableGuard();
-    }
-
-    void InitializeDisplayEnableGuard() {
-        if (xTaskCreate(DisplayEnableGuardTrampoline, "disp_en_guard", 3072, this, 2, nullptr) !=
-            pdPASS) {
-            ESP_LOGW(TAG, "Failed to create display enable guard task");
-        }
     }
 
     void InitializeSpi() {
@@ -208,11 +136,7 @@ private:
 
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
-            // Pressing the button shakes the board too; keep the IMU from reading it
-            // as a posture change (see ImuMonitor::NotifyUserInteraction).
-            ImuMonitor::NotifyUserInteraction();
             auto& app = Application::GetInstance();
-            app.ReportUserEvent("button_click", "boot");
             if (app.GetDeviceState() == kDeviceStateStarting) {
                 EnterWifiConfigMode();
                 return;
@@ -220,37 +144,14 @@ private:
             app.ToggleChatState();
         });
 
-        // 长按 BOOT 键 8 秒：清除服务器下发的协议配置并重启。
-        // 用于配置失效（如服务器更换地址、配置损坏）导致设备无法连接时恢复：
-        // 重启后 MQTT/WebSocket 配置为空，会重新执行版本检查与激活流程。
-        boot_button_.OnLongPress([]() {
-            ESP_LOGW(TAG, "BOOT long-press detected, resetting server config");
-            Application::GetInstance().Schedule([]() {
-                auto& app = Application::GetInstance();
-                app.Alert("重置配置", "已清除服务器配置，正在重启…", "neutral");
-
-                Settings mqtt_settings("mqtt", true);
-                mqtt_settings.EraseAll();
-                Settings websocket_settings("websocket", true);
-                websocket_settings.EraseAll();
-
-                vTaskDelay(pdMS_TO_TICKS(800));
-                app.Reboot();
-            });
-        });
-
         pwr_button_.OnLongPress([this]() {
             if(is_PwrControlEn) {
                 is_PwrControlEn = false;
-                // 注意：EXIO6 拉低后全工程没有任何路径把它写回 1，只有重启能恢复。
-                // 若这块板 EXIO6 关联供电，长按 PWR 会不可逆地掉电/灭屏。
-                ESP_LOGW(TAG, "PWR long-press: EXIO6 -> 0 (no restore path until reboot)");
                 esp_io_expander_set_level(io_expander, IO_EXPANDER_PIN_NUM_6, 0);
             }
         });
 
         pwr_button_.OnPressUp([this]() {
-            ImuMonitor::NotifyUserInteraction();
             if(!is_PwrControlEn) {
                 is_PwrControlEn = true;
             }
@@ -299,7 +200,7 @@ private:
             if(pointY > DISPLAY_HEIGHT) pointY = DISPLAY_HEIGHT;
             indevData->point.x = pointY;
             indevData->point.y = (DISPLAY_HEIGHT-pointX);
-            ESP_LOGD(TAG, "Touch point: (%ld,%ld)", (long)indevData->point.x, (long)indevData->point.y);
+            ESP_LOGE("Touch","(%ld,%ld)",indevData->point.x,indevData->point.y);
         } else {
             indevData->state = LV_INDEV_STATE_RELEASED;
         }
@@ -311,35 +212,9 @@ private:
         }
     }
 
-    void InitializeBatteryMonitor() {
-        adc_battery_monitor_ = new AdcBatteryMonitor(BATTERY_ADC_UNIT, BATTERY_ADC_CHANNEL,
-                                                      BATTERY_ADC_UPPER_RESISTOR, BATTERY_ADC_LOWER_RESISTOR);
-    }
-
-    void InitializeImu() {
-        // IMU 接在音频 I2C 总线上（GPIO 47/48），地址 0x6B
-        // 可通过控制通道的 set_imu 命令或 NVS (imu/enabled) 关闭，避免调试时误触发。
-        Settings settings("imu", false);
-        bool enabled = settings.GetBool("enabled", true);
-        imu_available_ = imu_monitor_.Initialize(i2c_bus_, enabled);
-        if (!imu_available_) {
-            ESP_LOGW(TAG, "IMU not initialized, gesture trigger disabled");
-        } else if (!enabled) {
-            ESP_LOGI(TAG, "IMU motion detection disabled by NVS");
-        }
-    }
-
-    void InitializeRtc() {
-        // RTC 同样接在音频 I2C 总线上（GPIO 47/48），地址 0x51
-        if (!rtc_monitor_.Initialize(i2c_bus_)) {
-            ESP_LOGW(TAG, "RTC not initialized, time will not persist offline");
-        }
-    }
-
 public:
     CustomBoard() :
-        // BOOT 键配置 8 秒长按（用于重置服务器配置，见 InitializeButtons）
-        boot_button_(BOOT_BUTTON_GPIO, false, 8000),
+        boot_button_(BOOT_BUTTON_GPIO),
         pwr_button_(PWR_BUTTON_GPIO) {
         InitializeI2c();
         InitializeTca9554();
@@ -348,10 +223,6 @@ public:
         InitializeButtons();
         InitializeTouch();
         GetPwrCurrentState();
-        InitializeBatteryMonitor();
-        InitializeImu();
-        InitializeRtc();
-        InitializeDisplayEnableGuard();
         GetBacklight()->RestoreBrightness();
     }
 
@@ -380,33 +251,6 @@ public:
         static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
         return &backlight;
     }
-
-    virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
-        if (adc_battery_monitor_ == nullptr) {
-            return false;
-        }
-        // 本板无充电状态引脚，充电状态由 adc_battery_estimation 的软件趋势估算得出，
-        // 而该估算只在 GetBatteryLevel() 内部推进。必须先取电量，再读充电状态，
-        // 否则 IsCharging() 拿到的是上一轮的旧值。
-        level = adc_battery_monitor_->GetBatteryLevel();
-        charging = adc_battery_monitor_->IsCharging();
-        discharging = adc_battery_monitor_->IsDischarging();
-        return true;
-    }
-
-    bool HasImu() override { return imu_available_; }
-
-    bool SetImuEnabled(bool enabled) override {
-        if (!imu_available_) {
-            return false;
-        }
-        imu_monitor_.SetEnabled(enabled);
-        Settings settings("imu", true);
-        settings.SetBool("enabled", enabled);
-        return true;
-    }
-
-    bool IsImuEnabled() override { return imu_available_ && imu_monitor_.IsEnabled(); }
 };
 
 DECLARE_BOARD(CustomBoard);

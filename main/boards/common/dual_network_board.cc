@@ -96,9 +96,3 @@ std::string DualNetworkBoard::GetBoardJson() {
 std::string DualNetworkBoard::GetDeviceStatusJson() {
     return current_board_->GetDeviceStatusJson();
 }
-
-std::string DualNetworkBoard::GetIpAddress() { return current_board_->GetIpAddress(); }
-
-std::string DualNetworkBoard::GetWifiSsid() { return current_board_->GetWifiSsid(); }
-
-int DualNetworkBoard::GetWifiRssi() { return current_board_->GetWifiRssi(); }

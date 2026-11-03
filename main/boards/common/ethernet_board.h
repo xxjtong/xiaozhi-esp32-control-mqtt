@@ -36,7 +36,6 @@ public:
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override;
     virtual AudioCodec* GetAudioCodec() override { return nullptr; }
     virtual std::string GetDeviceStatusJson() override;
-    virtual std::string GetIpAddress() override { return ip_address_; }
 };
 
 #endif // ETHERNET_BOARD_H

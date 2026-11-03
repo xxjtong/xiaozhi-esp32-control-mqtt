@@ -4,8 +4,8 @@ LvglTheme::LvglTheme(const std::string& name) : Theme(name) {
 }
 
 lv_color_t LvglTheme::ParseColor(const std::string& color) {
-    // A shorter value such as "#fff" would make substr(5, 2) throw
-    // std::out_of_range (and abort if uncaught).
+    // A shorter value such as "#fff" would make substr() throw
+    // std::out_of_range, which aborts because C++ exceptions are disabled.
     if (color.size() >= 7 && color[0] == '#') {
         // Convert #112233 to lv_color_t
         uint8_t r = strtol(color.substr(1, 2).c_str(), nullptr, 16);

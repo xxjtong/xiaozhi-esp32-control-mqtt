@@ -45,6 +45,10 @@ private:
     mutable std::mutex channel_mutex_;
     std::mutex crypto_mutex_;
     std::unique_ptr<Mqtt> mqtt_;
+    // Shared so SendAudio() can hold a reference and call Send() without
+    // holding channel_mutex_; the UDP receive callback (run on the modem's
+    // AT event task) also needs that mutex, so holding it across a blocking
+    // Send() would stall AT response parsing and cause spurious timeouts.
     std::shared_ptr<Udp> udp_;
     psa_key_id_t aes_key_id_ = PSA_KEY_ID_NULL;
     std::string aes_nonce_;

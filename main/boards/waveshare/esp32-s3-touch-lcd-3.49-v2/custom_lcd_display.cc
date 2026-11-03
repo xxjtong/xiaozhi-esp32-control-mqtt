@@ -1,7 +1,6 @@
 #include "custom_lcd_display.h"
 
 #include "lcd_display.h"
-#include "lvgl_theme.h"
 
 #include <vector>
 #include <esp_log.h>
@@ -12,7 +11,6 @@
 #include "settings.h"
 
 #include "esp_lcd_panel_io.h"
-#include <esp_timer.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -21,49 +19,11 @@
 #include "config.h"
 
 #include "board.h"
-#include "application.h"
-#include "device_state.h"
-#include "company_logo.h"
-#include "imu_monitor.h"
 
 #define TAG "CustomLcdDisplay"
 
 static SemaphoreHandle_t trans_done_sem = NULL;
 static uint16_t *trans_buf_1;
-
-// 单个 QSPI 分段（22 KB @40 MHz）正常不到 10 ms 完成，500 ms 已是非常宽松的余量。
-// 不能再用 portMAX_DELAY：一旦某次 tx_color() 失败，on_color_trans_done 不会再触发，
-// LVGL 任务会永久阻塞并一直持有 lvgl_mux，主任务随后卡在 UpdateStatusBar() 的
-// DisplayLockGuard(30000) 上，连 10 s 一次的 SystemInfo 心跳都打不出来——
-// 表现就是「黑屏、串口静默、但还能说话」，只能按 RESET 恢复。
-static constexpr TickType_t FLUSH_TRANS_DONE_TIMEOUT = pdMS_TO_TICKS(500);
-// 判定显示链路已锁死所需的持续失败窗口 / 最小失败次数。
-static constexpr int64_t FLUSH_RECOVER_WINDOW_US = 20 * 1000 * 1000;
-static constexpr uint32_t FLUSH_RECOVER_MIN_FAILURES = 5;
-
-static int64_t last_flush_success_us = 0;
-static uint32_t flush_failure_count = 0;
-
-// 本次 flush 失败处理。这里运行在 LVGL 任务里，任何影响运行时状态的操作
-// 都必须经由 Application::Schedule() 派发到主任务。
-static void ReportFlushFailure(const char* reason, int chunk) {
-    ++flush_failure_count;
-    if (flush_failure_count == 1 || (flush_failure_count % 10) == 0) {
-        ESP_LOGE(TAG, "Flush failure #%u: %s (chunk %d)", flush_failure_count, reason, chunk);
-    }
-    // 长时间持续失败且始终没成功过 → 显示链路已锁死，重启自恢复，
-    // 否则只能靠人工按 RESET。
-    if (flush_failure_count >= FLUSH_RECOVER_MIN_FAILURES &&
-        (esp_timer_get_time() - last_flush_success_us) > FLUSH_RECOVER_WINDOW_US) {
-        ESP_LOGE(TAG, "Display flush stuck for >%d s, rebooting to recover",
-                 (int)(FLUSH_RECOVER_WINDOW_US / 1000000));
-        flush_failure_count = 0;
-        last_flush_success_us = esp_timer_get_time();
-        Application::GetInstance().Schedule([]() {
-            Application::GetInstance().Reboot();
-        });
-    }
-}
 
 #if (DISPLAY_ROTATION_90 == true)
 static uint16_t *dest_map;
@@ -120,37 +80,17 @@ void CustomLcdDisplay::lvgl_port_flush_callback(lv_display_t *drv, const lv_area
 #else
     uint16_t *map = (uint16_t*)color_map;
 #endif
-    // 清掉可能残留的信号量计数：上一帧若超时，迟到的 trans-done 回调会把计数
-    // 留在 1，不清掉的话后续等待会立刻返回，形同虚设。
-    while (xSemaphoreTake(trans_done_sem, 0) == pdTRUE) {
-    }
+    xSemaphoreGive(trans_done_sem);
 
-    bool flush_ok = true;
-    for (int i = 0; i < flush_coun; i++) {
-        memcpy(trans_buf_1, map, LVGL_DMA_BUFF_LEN);
-        esp_err_t err = esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1,
-                                                  offsetx2, offsety2, trans_buf_1);
-        if (err != ESP_OK) {
-            ReportFlushFailure("esp_lcd_panel_draw_bitmap failed", i);
-            flush_ok = false;
-            break;
-        }
-        if (xSemaphoreTake(trans_done_sem, FLUSH_TRANS_DONE_TIMEOUT) != pdTRUE) {
-            ReportFlushFailure("trans-done not received", i);
-            flush_ok = false;
-            break;
-        }
+    for(int i = 0; i<flush_coun; i++) {
+        xSemaphoreTake(trans_done_sem,portMAX_DELAY);
+        memcpy(trans_buf_1,map,LVGL_DMA_BUFF_LEN);
+        esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2, offsety2, trans_buf_1);
         offsety1 += offgap;
         offsety2 += offgap;
         map += dmalen;
     }
-
-    if (flush_ok) {
-        flush_failure_count = 0;
-        last_flush_success_us = esp_timer_get_time();
-    }
-    // 失败也必须调用 lv_disp_flush_ready()：否则 LVGL 认为本次刷新尚未结束，
-    // 后续所有刷新都会被永远挡住，屏幕彻底不再更新。
+    xSemaphoreTake(trans_done_sem,portMAX_DELAY);
     lv_disp_flush_ready(drv);
 }
 
@@ -169,7 +109,6 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
     port_cfg.timer_period_ms = 50;
     lvgl_port_init(&port_cfg);
     trans_done_sem = xSemaphoreCreateBinary();
-    last_flush_success_us = esp_timer_get_time();
     trans_buf_1 = (uint16_t *)heap_caps_malloc(LVGL_DMA_BUFF_LEN, MALLOC_CAP_DMA);
 
     uint32_t buffer_size = 0;
@@ -181,9 +120,8 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
     buffer_size = width_ * height_;
     buf1 = (lv_color_t *)heap_caps_aligned_alloc(1, buffer_size * color_bytes, MALLOC_CAP_SPIRAM);
 #if (DISPLAY_ROTATION_90 == true)
-    // 旋转目标缓冲需满足 LVGL 绘制缓冲对齐要求（CONFIG_LV_DRAW_BUF_ALIGN = 4）
-    dest_map = (uint16_t *)heap_caps_aligned_alloc(4, buffer_size * color_bytes, MALLOC_CAP_SPIRAM);
-    lv_display_set_rotation(display_, LV_DISPLAY_ROTATION_270);
+    dest_map = (uint16_t *)heap_caps_malloc(buffer_size * color_bytes, MALLOC_CAP_SPIRAM);
+    lv_display_set_rotation(display_, LV_DISPLAY_ROTATION_90);
 #endif
     lv_display_set_buffers(display_, buf1, NULL, buffer_size * color_bytes, LV_DISPLAY_RENDER_MODE_FULL);
     lv_display_set_user_data(display_, panel_);
@@ -206,274 +144,4 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
 
     // Note: SetupUI() should be called by Application::Initialize(), not in constructor
     // to ensure lvgl objects are created after the display is fully initialized.
-}
-
-CustomLcdDisplay::~CustomLcdDisplay() {
-    if (click_timer_ != nullptr) {
-        lv_timer_delete(click_timer_);
-        click_timer_ = nullptr;
-    }
-}
-
-// 递归给对象树补上事件冒泡标志：
-// LVGL 的事件冒泡是逐级生效的，只有子对象自身带 EVENT_BUBBLE 标志时其事件才会传给父对象，
-// 因此需要覆盖从 container_ 往下的所有层级，否则深层对象上的点击到不了 container_。
-void CustomLcdDisplay::EnableEventBubbling(lv_obj_t* obj) {
-    uint32_t child_cnt = lv_obj_get_child_count(obj);
-    for (uint32_t i = 0; i < child_cnt; i++) {
-        lv_obj_t* child = lv_obj_get_child(obj, i);
-        if (child == nullptr) {
-            continue;
-        }
-        lv_obj_add_flag(child, LV_OBJ_FLAG_EVENT_BUBBLE);
-        EnableEventBubbling(child);
-    }
-}
-
-// 聊天消息等对象在运行期动态创建，创建时补上冒泡标志，
-// 否则这些对象上的点击无法冒泡到 container_。
-// LV_EVENT_CHILD_CREATED 会始终冒泡到所有父对象，故注册在 container_ 上即可覆盖整棵树。
-void CustomLcdDisplay::OnChildCreatedEvent(lv_event_t* e) {
-    auto* child = static_cast<lv_obj_t*>(lv_event_get_param(e));
-    if (child != nullptr) {
-        lv_obj_add_flag(child, LV_OBJ_FLAG_EVENT_BUBBLE);
-    }
-}
-
-// 注册点击手势：双击清预览图、三击切换主题（light <-> dark）
-void CustomLcdDisplay::SetupUI() {
-    // 父类 SetupUI 自带重复调用保护；这里若已初始化过则直接返回，避免把点击
-    // 回调和手势定时器再注册一遍（否则一次点击会被处理两次）。
-    if (IsSetupUICalled()) {
-        ESP_LOGW(TAG, "SetupUI() called multiple times, skipping gesture setup");
-        return;
-    }
-
-    // 先调用父类的 SetupUI 完成标准 UI 初始化
-    LcdDisplay::SetupUI();
-
-    if (container_ == nullptr) {
-        return;
-    }
-
-    // 父类 SetupUI 返回后已释放 LVGL 锁；这里继续改对象树/注册回调/创建定时器，
-    // 必须重新持有显示锁，避免与 LVGL 任务并发。
-    DisplayLockGuard lock(this);
-
-    // emoji_box_ / emoji_image_ 只用于显示。空闲时会把全屏 logo 放进 emoji_image_，
-    // 而 emoji_box_ 是 LV_SIZE_CONTENT，会被撑满整个屏幕；LVGL 里 lv_obj 默认带
-    // LV_OBJ_FLAG_CLICKABLE，这个全屏容器会把点击事件全部吞掉，导致 container_
-    // 收不到点击、清图/切主题失效。这里去掉可点击标志让触摸穿透。
-    lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_CLICKABLE);
-
-    // 覆盖已有对象树，并监听后续动态创建的对象
-    EnableEventBubbling(container_);
-    lv_obj_add_event_cb(container_, OnChildCreatedEvent, LV_EVENT_CHILD_CREATED, nullptr);
-
-    lv_obj_add_event_cb(container_, OnScreenClickEvent, LV_EVENT_SHORT_CLICKED, this);
-
-    // 预览图容器铺满屏幕（为了支持上下拖动），它会吞掉落在图片区域上的点击，
-    // 事件也不会冒泡到 container_，所以这里单独挂一份点击判定。
-    if (preview_viewport_ != nullptr) {
-        lv_obj_add_event_cb(preview_viewport_, OnScreenClickEvent, LV_EVENT_SHORT_CLICKED, this);
-    }
-    // One-shot style timer (paused until the second click) used to distinguish a
-    // double-click from a triple-click: the third click cancels the pending clear.
-    if (click_timer_ == nullptr) {
-        click_timer_ = lv_timer_create(OnClickTimer, CLICK_WINDOW_MS, this);
-        if (click_timer_ != nullptr) {
-            lv_timer_pause(click_timer_);
-        }
-    }
-    ESP_LOGI(TAG, "Double-click clears preview, triple-click switches theme");
-}
-
-// 双击清预览图、三击切换主题（light <-> dark）。
-// 注意：不能用 LV_EVENT_DOUBLE_CLICKED / LV_EVENT_TRIPLE_CLICKED —— LVGL 9 把单击/双击/
-// 三击做成「按 3 次循环」下发（见 lv_indev.c indev_proc_short_click：streak 1→SINGLE、
-// 2→DOUBLE、3→TRIPLE、4→SINGLE…），连续点击时只有第 2、5、8 次才是 DOUBLE_CLICKED。
-// 因此这里改用每次点击都会下发的 LV_EVENT_SHORT_CLICKED，自己按时间间隔累计点击次数。
-void CustomLcdDisplay::OnScreenClickEvent(lv_event_t* e) {
-    auto* self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
-    if (self == nullptr) return;
-
-    // Touching the screen shakes the board. Stamp the interaction so the IMU does not
-    // read the tap (or the double/triple click that follows) as a posture change.
-    ImuMonitor::NotifyUserInteraction();
-
-    if (self->last_click_tick_ != 0 &&
-        lv_tick_elaps(self->last_click_tick_) <= CLICK_WINDOW_MS) {
-        if (self->click_streak_ < 3) {
-            ++self->click_streak_;
-        }
-    } else {
-        self->click_streak_ = 1;
-        // A new sequence started: cancel any pending double-click clear from the
-        // previous gesture (it may not have fired yet on a busy LVGL task).
-        self->pending_clear_ = false;
-        self->pending_clear_target_ = nullptr;
-        if (self->click_timer_ != nullptr) {
-            lv_timer_pause(self->click_timer_);
-        }
-    }
-    self->last_click_tick_ = lv_tick_get();
-
-    if (self->click_streak_ == 2) {
-        // While a broadcast is playing the double-click means "stop playing". It must
-        // not also clear the preview image, and the streak is consumed so a third tap
-        // cannot switch the theme right after stopping playback.
-        if (Application::GetInstance().GetDeviceState() == kDeviceStateNotifying) {
-            self->click_streak_ = 0;
-            self->last_click_tick_ = 0;
-            self->pending_clear_ = false;
-            self->pending_clear_target_ = nullptr;
-            if (self->click_timer_ != nullptr) {
-                lv_timer_pause(self->click_timer_);
-            }
-            ESP_LOGI(TAG, "Double-click stops notification playback");
-            // StopNotificationByUser() must run on the main task; report the event
-            // there too so the state it carries matches what really happened (the
-            // audio may have ended between the gesture and this callback).
-            Application::GetInstance().Schedule([]() {
-                auto& app = Application::GetInstance();
-                if (app.GetDeviceState() != kDeviceStateNotifying) {
-                    return;
-                }
-                app.ReportUserEvent("notify_stopped", "double_click");
-                app.StopNotificationByUser();
-            });
-            return;
-        }
-
-        // Wait for the window to expire before clearing: a third click within the
-        // window turns this into a triple-click and must cancel the clear.
-        {
-            DisplayLockGuard lock(self);
-            self->pending_clear_ = self->preview_image_cached_ != nullptr;
-            self->pending_clear_target_ = self->preview_image_cached_.get();
-        }
-        if (self->pending_clear_ && self->click_timer_ != nullptr) {
-            lv_timer_reset(self->click_timer_);
-            lv_timer_resume(self->click_timer_);
-        } else {
-            self->ClearPreviewImage();
-        }
-    } else if (self->click_streak_ == 3) {
-        // Consume the streak so a fourth click starts a new sequence.
-        self->click_streak_ = 0;
-        self->last_click_tick_ = 0;
-        self->pending_clear_ = false;
-        self->pending_clear_target_ = nullptr;
-        if (self->click_timer_ != nullptr) {
-            lv_timer_pause(self->click_timer_);
-        }
-        self->ToggleTheme();
-    }
-}
-
-void CustomLcdDisplay::OnClickTimer(lv_timer_t* timer) {
-    auto* self = static_cast<CustomLcdDisplay*>(lv_timer_get_user_data(timer));
-    if (self == nullptr) {
-        return;
-    }
-    lv_timer_pause(timer);
-    self->click_streak_ = 0;
-    self->last_click_tick_ = 0;
-    // A new image may have arrived inside the double-click window; only clear the
-    // exact image the user double-clicked on.
-    {
-        DisplayLockGuard lock(self);
-        if (self->pending_clear_ &&
-            self->preview_image_cached_.get() == self->pending_clear_target_) {
-            self->ClearPreviewImage();
-        }
-    }
-    self->pending_clear_ = false;
-    self->pending_clear_target_ = nullptr;
-}
-
-void CustomLcdDisplay::ClearPreviewImage() {
-    // The LVGL task (gesture timer/event) and the main task (remote set_image) can
-    // both touch preview_image_cached_; serialize the check with SetPreviewImage().
-    DisplayLockGuard lock(this);
-    if (preview_image_cached_ == nullptr) {
-        return;
-    }
-    // 远程下发的图片会常驻屏幕并挡住界面，双击时清除，恢复正常 UI。
-    ESP_LOGI(TAG, "Clearing persistent preview image on double-click");
-    SetPreviewImage(nullptr);
-    if (preview_image_cached_ != nullptr) {
-        // UI was not ready (or the display rejected the clear); don't claim success.
-        ESP_LOGW(TAG, "Failed to clear preview image");
-        return;
-    }
-    Application::GetInstance().ReportUserEvent("image_cleared", "double_click");
-}
-
-void CustomLcdDisplay::ToggleTheme() {
-    Theme* current = GetTheme();
-    if (current == nullptr) return;
-
-    std::string current_name = current->name();
-    std::string next_name = (current_name == "light") ? "dark" : "light";
-
-    LvglTheme* next_theme = LvglThemeManager::GetInstance().GetTheme(next_name);
-    if (next_theme == nullptr) return;
-
-    ESP_LOGI(TAG, "Switching theme: %s -> %s", current_name.c_str(), next_name.c_str());
-    SetTheme(next_theme);
-    Application::GetInstance().ReportUserEvent("theme_changed", next_name);
-}
-
-// 空闲/开机时用公司 logo 顶替默认的机器人图标。
-// 开机阶段默认表情是 "robot_2"，进入空闲后状态机会下发 "neutral"；
-// 但 "neutral" 在 connecting/listening 状态下也会下发，所以只有确实处于
-// 空闲状态时才换成 logo，其余状态保持原有表情逻辑。
-void CustomLcdDisplay::SetEmotion(const char* emotion) {
-    if (emotion == nullptr) {
-        showing_logo_ = false;
-        LcdDisplay::SetEmotion(emotion);
-        return;
-    }
-
-    bool is_boot_logo = (strcmp(emotion, "robot_2") == 0);
-    bool is_idle_neutral = (strcmp(emotion, "neutral") == 0) &&
-                           Application::GetInstance().GetDeviceState() == kDeviceStateIdle;
-    if (is_boot_logo || is_idle_neutral) {
-        ShowCompanyLogo();
-        return;
-    }
-
-    showing_logo_ = false;
-    LcdDisplay::SetEmotion(emotion);
-}
-
-void CustomLcdDisplay::ShowCompanyLogo() {
-    if (emoji_image_ == nullptr || emoji_label_ == nullptr) {
-        return;
-    }
-
-    DisplayLockGuard lock(this);
-    if (gif_controller_) {
-        gif_controller_->Stop();
-        gif_controller_.reset();
-    }
-
-    // 深色主题下黑色文字看不见，换用白色文字版本
-    auto* theme = static_cast<LvglTheme*>(GetTheme());
-    bool dark = (theme != nullptr && theme->name() == "dark");
-    lv_image_set_src(emoji_image_, dark ? &virsical_logo_dark : &virsical_logo_light);
-    lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
-    showing_logo_ = true;
-}
-
-void CustomLcdDisplay::SetTheme(Theme* theme) {
-    LcdDisplay::SetTheme(theme);
-    // 主题切换后 logo 需要重绘（深/浅色版本不同）
-    if (showing_logo_) {
-        ShowCompanyLogo();
-    }
 }

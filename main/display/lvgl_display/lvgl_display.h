@@ -22,27 +22,16 @@ public:
     virtual ~LvglDisplay();
 
     virtual void SetStatus(const char* status);
-    virtual void SetStatusColor(uint32_t rgb) override;
     virtual void ShowNotification(const char* notification, int duration_ms = 3000);
     virtual void ShowNotification(const std::string& notification, int duration_ms = 3000);
-    virtual void SetPreviewImage(std::unique_ptr<LvglImage> image);
-    // Stop any auto-hide timer so the currently shown preview stays on screen.
-    // Displays without such a timer can keep the default no-op.
-    virtual void CancelPreviewTimeout();
-    // Use the image as the desktop background (persists across theme switches).
-    // Displays without a wallpaper layer keep the default no-op. Returns false when
-    // the image cannot be converted (unsupported format, out of memory, no layer).
-    virtual bool SetBackgroundImage(std::unique_ptr<LvglImage> image);
-    virtual void ClearBackgroundImage();
-    // Current UI state, used by the control channel's query_status diagnostics.
-    virtual bool HasPreviewImage();
-    virtual bool HasBackgroundImage();
+    virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
-    virtual bool SnapshotToJpeg(std::string& jpeg_data, int quality = 80);
+    virtual bool SnapshotToJpeg(std::string& jpeg_data, int quality = 80) override;
     virtual bool AddTextGlyphs(const std::vector<TextGlyph>& glyphs, uint8_t bpp) override;
     virtual void ClearTextGlyphs() override;
-    bool SetTextFont(std::shared_ptr<LvglFont> text_font);
+    virtual bool SetTextFont(std::shared_ptr<LvglFont> text_font) override;
+    virtual bool SupportsGuiOperations() const override { return true; }
 
 protected:
     esp_pm_lock_handle_t pm_lock_ = nullptr;
@@ -57,7 +46,6 @@ protected:
     lv_obj_t* low_battery_label_ = nullptr;
 
     const char* battery_icon_ = nullptr;
-    int last_battery_level_ = -1;
     const char* network_icon_ = nullptr;
     bool muted_ = false;
 

@@ -24,7 +24,6 @@ protected:
     lv_obj_t* side_bar_ = nullptr;
     lv_obj_t* bottom_bar_ = nullptr;
     lv_obj_t* preview_image_ = nullptr;
-    lv_obj_t* preview_viewport_ = nullptr;  // scrollable container for preview_image_
     lv_obj_t* emoji_label_ = nullptr;
     lv_obj_t* emoji_image_ = nullptr;
     std::unique_ptr<LvglGif> gif_controller_ = nullptr;
@@ -35,8 +34,6 @@ protected:
     bool hide_subtitle_ = false;  // Control whether to hide chat messages/subtitles
 
     void InitializeLcdThemes();
-    // Cover-scale (center-crop) an image to the screen size for use as wallpaper.
-    std::unique_ptr<LvglImage> CreateCoverBackground(std::unique_ptr<LvglImage> src);
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
 
@@ -51,17 +48,12 @@ public:
     virtual void SetChatMessage(const char* role, const char* content) override;
     virtual void ClearChatMessages() override;
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
-    virtual void CancelPreviewTimeout() override;
-    virtual bool SetBackgroundImage(std::unique_ptr<LvglImage> image) override;
-    virtual void ClearBackgroundImage() override;
-    virtual bool HasPreviewImage() override;
-    virtual bool HasBackgroundImage() override;
     virtual void SetupUI() override;
     // Add theme switching function
     virtual void SetTheme(Theme* theme) override;
 
     // Set whether to hide chat messages/subtitles
-    void SetHideSubtitle(bool hide);
+    virtual void SetHideSubtitle(bool hide) override;
 };
 
 // SPI LCD display

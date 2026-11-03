@@ -2,6 +2,7 @@
 #include "assets/lang_config.h"
 #include "lvgl_font.h"
 #include "lvgl_theme.h"
+#include "settings.h"
 
 #include <algorithm>
 #include <string>
@@ -20,11 +21,10 @@ LV_FONT_DECLARE(font_material_symbols_30_1);
 LV_FONT_DECLARE(font_noto_emoji_30_1);
 
 OledDisplay::OledDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
-                         int width, int height, bool mirror_x, bool mirror_y, bool swap_xy)
+                         int width, int height, bool mirror_x, bool mirror_y)
     : panel_io_(panel_io), panel_(panel) {
     width_ = width;
     height_ = height;
-    swap_xy_ = swap_xy;
 
     auto text_font = std::make_shared<LvglBuiltInFont>(&BUILTIN_TEXT_FONT);
     auto icon_font = std::make_shared<LvglBuiltInFont>(&BUILTIN_ICON_FONT);
@@ -58,12 +58,12 @@ OledDisplay::OledDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handl
         .buffer_size = static_cast<uint32_t>(width_ * height_),
         .double_buffer = false,
         .trans_size = 0,
-        .hres = static_cast<uint32_t>(swap_xy_ ? height_ : width_),
-        .vres = static_cast<uint32_t>(swap_xy_ ? width_ : height_),
+        .hres = static_cast<uint32_t>(width_),
+        .vres = static_cast<uint32_t>(height_),
         .monochrome = true,
         .rotation =
             {
-                .swap_xy = swap_xy,
+                .swap_xy = false,
                 .mirror_x = mirror_x,
                 .mirror_y = mirror_y,
             },
@@ -315,11 +315,6 @@ void OledDisplay::SetupUI_128x32() {
     auto screen = lv_screen_active();
     lv_obj_set_style_text_font(screen, text_font, 0);
 
-    if (swap_xy_) {
-        SetupUI_128x32_Portrait();
-        return;
-    }
-
     /* Container */
     container_ = lv_obj_create(screen);
     lv_obj_set_size(container_, LV_HOR_RES, LV_VER_RES);
@@ -397,98 +392,6 @@ void OledDisplay::SetupUI_128x32() {
                                    LV_PART_MAIN);
 }
 
-void OledDisplay::SetupUI_128x32_Portrait() {
-    /* 竖屏布局：物理 128x32 通过 swap_xy 旋转 90°，逻辑分辨率变为
-       32 宽 x 128 高（LV_HOR_RES x LV_VER_RES）。 */
-
-    auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
-    auto icon_font = lvgl_theme->icon_font()->font();
-    auto large_icon_font = lvgl_theme->large_icon_font()->font();
-
-    /* 容器 - 垂直列布局 */
-    container_ = lv_obj_create(lv_screen_active());
-    lv_obj_set_size(container_, LV_HOR_RES, LV_VER_RES);
-    lv_obj_set_flex_flow(container_, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(container_, 0, 0);
-    lv_obj_set_style_border_width(container_, 0, 0);
-    lv_obj_set_style_pad_row(container_, 0, 0);
-
-    /* 顶部表情图标 - 全宽，32px 高 */
-    content_ = lv_obj_create(container_);
-    lv_obj_set_size(content_, LV_HOR_RES, 32);
-    lv_obj_set_style_pad_all(content_, 0, 0);
-    lv_obj_set_style_border_width(content_, 0, 0);
-    lv_obj_set_style_radius(content_, 0, 0);
-
-    emotion_label_ = lv_label_create(content_);
-    lv_obj_set_style_text_font(emotion_label_, large_icon_font, 0);
-    lv_label_set_text(emotion_label_, MATERIAL_SYMBOLS_ROBOT_2);
-    lv_obj_center(emotion_label_);
-
-    /* 侧栏 - 在表情下方放置状态栏、状态文字和聊天消息 */
-    side_bar_ = lv_obj_create(container_);
-    lv_obj_set_size(side_bar_, LV_HOR_RES, LV_VER_RES - 32);
-    lv_obj_set_flex_flow(side_bar_, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(side_bar_, 0, 0);
-    lv_obj_set_style_border_width(side_bar_, 0, 0);
-    lv_obj_set_style_radius(side_bar_, 0, 0);
-    lv_obj_set_style_pad_row(side_bar_, 0, 0);
-
-    /* 状态栏 - 水平排列状态图标，16px 高 */
-    status_bar_ = lv_obj_create(side_bar_);
-    lv_obj_set_size(status_bar_, LV_HOR_RES, 16);
-    lv_obj_set_style_radius(status_bar_, 0, 0);
-    lv_obj_set_flex_flow(status_bar_, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(status_bar_, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(status_bar_, 0, 0);
-    lv_obj_set_style_border_width(status_bar_, 0, 0);
-    lv_obj_set_style_pad_column(status_bar_, 0, 0);
-
-    network_label_ = lv_label_create(status_bar_);
-    lv_label_set_text(network_label_, "");
-    lv_obj_set_style_text_font(network_label_, icon_font, 0);
-
-    mute_label_ = lv_label_create(status_bar_);
-    lv_label_set_text(mute_label_, "");
-    lv_obj_set_style_text_font(mute_label_, icon_font, 0);
-
-    battery_label_ = lv_label_create(status_bar_);
-    lv_label_set_text(battery_label_, "");
-    lv_obj_set_style_text_font(battery_label_, icon_font, 0);
-
-    /* 状态文字 - 在图标下方滚动的单行文字 */
-    status_label_ = lv_label_create(side_bar_);
-    lv_obj_set_width(status_label_, LV_HOR_RES);
-    lv_obj_set_style_pad_left(status_label_, 2, 0);
-    lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_label_set_text(status_label_, Lang::Strings::INITIALIZING);
-
-    /* 通知标签 - 默认隐藏，显示时覆盖 status_label */
-    notification_label_ = lv_label_create(side_bar_);
-    lv_obj_set_width(notification_label_, LV_HOR_RES);
-    lv_obj_set_style_pad_left(notification_label_, 2, 0);
-    lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_LEFT, 0);
-    lv_label_set_text(notification_label_, "");
-    lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
-
-    /* 聊天消息 - 在窄 32px 宽度内自动换行 */
-    chat_message_label_ = lv_label_create(side_bar_);
-    lv_obj_set_size(chat_message_label_, LV_HOR_RES, LV_SIZE_CONTENT);
-    lv_obj_set_style_pad_left(chat_message_label_, 2, 0);
-    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(chat_message_label_, "");
-
-    // 延迟后开始滚动字幕
-    static lv_anim_t a_portrait;
-    lv_anim_init(&a_portrait);
-    lv_anim_set_delay(&a_portrait, 1000);
-    lv_anim_set_repeat_count(&a_portrait, LV_ANIM_REPEAT_INFINITE);
-    lv_obj_set_style_anim(chat_message_label_, &a_portrait, LV_PART_MAIN);
-    lv_obj_set_style_anim_duration(chat_message_label_, lv_anim_speed_clamped(60, 300, 60000),
-                                   LV_PART_MAIN);
-}
-
 void OledDisplay::SetEmotion(const char* emotion) {
     auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
     const char* utf8 = noto_emoji_get_utf8(emotion);
@@ -518,4 +421,14 @@ void OledDisplay::SetTheme(Theme* theme) {
 
     auto screen = lv_screen_active();
     lv_obj_set_style_text_font(screen, text_font, 0);
+}
+
+void OledDisplay::SetPowerSaveMode(bool on) {
+    if (panel_) {
+        Settings settings("wifi", false);
+        if (settings.GetBool("power_save_display_off", false)) {
+            esp_lcd_panel_disp_on_off(panel_, !on);
+        }
+    }
+    LvglDisplay::SetPowerSaveMode(on);
 }

@@ -82,17 +82,6 @@ public:
     virtual void SetPowerSaveLevel(PowerSaveLevel level) = 0;
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
-    // Optional network info (empty / 0 when the board has no such data).
-    virtual std::string GetIpAddress() { return ""; }
-    virtual std::string GetWifiSsid() { return ""; }
-    virtual int GetWifiRssi() { return 0; }
-    // Optional motion (IMU) capability. Boards without an IMU keep the defaults.
-    virtual bool HasImu() { return false; }
-    virtual bool SetImuEnabled(bool enabled) {
-        (void)enabled;
-        return false;
-    }
-    virtual bool IsImuEnabled() { return false; }
 };
 
 #define DECLARE_BOARD(BOARD_CLASS_NAME) \

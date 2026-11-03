@@ -119,24 +119,3 @@ void PwmBacklight::SetBrightnessImpl(uint8_t brightness) {
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
 
-bool Backlight::ReapplyBrightness() {
-    // 基类无法回读硬件，只能无条件重写。
-    SetBrightnessImpl(brightness_);
-    return true;
-}
-
-bool PwmBacklight::ReapplyBrightness() {
-    // 回读 LEDC 占空比与软件记录比对：只有真的不一致才重写并上报，
-    // 这样守护任务在正常状态下不会产生任何日志噪声。
-    uint32_t expected = (1023 * brightness_) / 100;
-    uint32_t actual = ledc_get_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-    if (actual == expected) {
-        return false;
-    }
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, expected);
-    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-    ESP_LOGW(TAG, "Backlight PWM out of sync (actual=%u expected=%u), restored",
-             (unsigned)actual, (unsigned)expected);
-    return true;
-}
-

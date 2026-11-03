@@ -12,7 +12,6 @@
 #include <material_symbols.h>
 #include <noto_emoji.h>
 #include <src/misc/cache/lv_cache.h>
-#include <src/draw/lv_image_decoder_private.h>
 #include <algorithm>
 #include <cstring>
 #include <vector>
@@ -20,14 +19,6 @@
 #include "board.h"
 
 #define TAG "LcdDisplay"
-
-namespace {
-bool IsPngData(const uint8_t* data, size_t len) {
-    static const uint8_t kPngSignature[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
-    return data != nullptr && len >= sizeof(kPngSignature) &&
-           memcmp(data, kPngSignature, sizeof(kPngSignature)) == 0;
-}
-}  // namespace
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
@@ -134,6 +125,34 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     // lv image cache, currently only PNG is supported
     size_t psram_size_mb = esp_psram_get_size() / 1024 / 1024;
     if (psram_size_mb >= 8) {
+#if CONFIG_LV_USE_BUILTIN_MALLOC
+        // Base TLSF pool is CONFIG_LV_MEM_SIZE_KILOBYTES in PSRAM; grow it so
+        // the 2MB decoded-image cache does not exhaust a 2MB-PSRAM-safe pool.
+        // TLSF rejects any single pool larger than LV_MEM_SIZE when
+        // LV_MEM_POOL_EXPAND_SIZE is 0 (block_size_max = 1 << ceil(log2(LV_MEM_SIZE))).
+        const size_t extra_total = 2560 * 1024;
+        const size_t chunk_size = LV_MEM_SIZE;
+        size_t added = 0;
+        while (added < extra_total) {
+            size_t this_chunk = extra_total - added;
+            if (this_chunk > chunk_size) {
+                this_chunk = chunk_size;
+            }
+            void* pool = heap_caps_malloc(this_chunk, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (pool == nullptr || lv_mem_add_pool(pool, this_chunk) == nullptr) {
+                if (pool != nullptr) {
+                    heap_caps_free(pool);
+                }
+                ESP_LOGE(TAG, "Failed to add %uKB LVGL PSRAM pool (added %uKB)",
+                         (unsigned)(this_chunk / 1024), (unsigned)(added / 1024));
+                break;
+            }
+            added += this_chunk;
+        }
+        if (added == extra_total) {
+            ESP_LOGI(TAG, "Added %uKB LVGL pool in PSRAM", (unsigned)(added / 1024));
+        }
+#endif
         lv_image_cache_resize(2 * 1024 * 1024, true);
         ESP_LOGI(TAG, "Use 2MB of PSRAM for image cache");
     } else if (psram_size_mb >= 2) {
@@ -151,6 +170,9 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     lvgl_port_init(&port_cfg);
 
     ESP_LOGI(TAG, "Adding LCD display");
+    // SPI LCD still needs an internal DMA bounce buffer for PSRAM sources.
+    // A full-frame transfer (~150KB) cannot allocate that bounce buffer, so
+    // keep a small DMA strip in internal SRAM and partial refresh.
     const lvgl_port_display_cfg_t display_cfg = {
         .io_handle = panel_io_,
         .panel_handle = panel_,
@@ -874,22 +896,11 @@ void LcdDisplay::SetupUI() {
     lv_obj_center(emoji_image_);
     lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
 
-    /* Middle layer: preview_image_ - scrollable viewport (vertical drag), picture centered */
-    // Must use the visible resolution (LV_HOR_RES/LV_VER_RES, already rotated) instead of
-    // width_/height_ (the panel's native orientation).
-    preview_viewport_ = lv_obj_create(screen);
-    lv_obj_set_size(preview_viewport_, LV_HOR_RES, LV_VER_RES);
-    lv_obj_align(preview_viewport_, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_opa(preview_viewport_, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(preview_viewport_, 0, 0);
-    lv_obj_set_style_radius(preview_viewport_, 0, 0);
-    lv_obj_set_style_pad_all(preview_viewport_, 0, 0);
-    lv_obj_set_scroll_dir(preview_viewport_, LV_DIR_VER);  // Only vertical dragging
-    lv_obj_set_scrollbar_mode(preview_viewport_, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_flag(preview_viewport_, LV_OBJ_FLAG_HIDDEN);
-
-    preview_image_ = lv_image_create(preview_viewport_);
-    lv_image_set_inner_align(preview_image_, LV_IMAGE_ALIGN_CENTER);
+    /* Middle layer: preview_image_ - centered display */
+    preview_image_ = lv_image_create(screen);
+    lv_obj_set_size(preview_image_, width_ / 2, height_ / 2);
+    lv_obj_align(preview_image_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
 
     /* Layer 1: Top bar - for status icons */
     top_bar_ = lv_obj_create(screen);
@@ -1038,7 +1049,7 @@ void LcdDisplay::SetupUI() {
 
 void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     DisplayLockGuard lock(this);
-    if (preview_image_ == nullptr || preview_viewport_ == nullptr) {
+    if (preview_image_ == nullptr) {
         ESP_LOGE(TAG, "Preview image is not initialized");
         return;
     }
@@ -1046,7 +1057,7 @@ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     if (image == nullptr) {
         esp_timer_stop(preview_timer_);
         lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(preview_viewport_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
         preview_image_cached_.reset();
         if (gif_controller_) {
             gif_controller_->Start();
@@ -1058,26 +1069,8 @@ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     auto img_dsc = preview_image_cached_->image_dsc();
     lv_image_set_src(preview_image_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
-        // Scale by width: the picture always occupies 80% of the screen width, and the
-        // height follows the aspect ratio. Taller-than-screen pictures can be dragged
-        // vertically inside preview_viewport_.
-        // LVGL scale unit is 1/256, so 256 == 100%.
-        int32_t target_width = LV_HOR_RES * 8 / 10;
-        int32_t scale = target_width * 256 / img_dsc->header.w;
-        // Never upscale beyond the source resolution: a small remote picture should
-        // stay sharp instead of being blown up to 80% of the screen width.
-        if (scale > 256) {
-            scale = 256;
-        }
-        int32_t scaled_width = img_dsc->header.w * scale / 256;
-        int32_t scaled_height = img_dsc->header.h * scale / 256;
-        lv_image_set_scale(preview_image_, scale);
-        lv_obj_set_size(preview_image_, scaled_width, scaled_height);
-        // Center short pictures; start from the top for pictures taller than the screen.
-        lv_coord_t offset_y =
-            (scaled_height < LV_VER_RES) ? (LV_VER_RES - scaled_height) / 2 : 0;
-        lv_obj_align(preview_image_, LV_ALIGN_TOP_MID, 0, offset_y);
-        lv_obj_scroll_to_y(preview_viewport_, 0, LV_ANIM_OFF);
+        // zoom factor 0.5
+        lv_image_set_scale(preview_image_, 128 * width_ / img_dsc->header.w);
     }
 
     // Hide emoji_box_
@@ -1085,7 +1078,7 @@ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
         gif_controller_->Stop();
     }
     lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(preview_viewport_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
     esp_timer_stop(preview_timer_);
     ESP_ERROR_CHECK(esp_timer_start_once(preview_timer_, PREVIEW_IMAGE_DURATION_MS * 1000));
 }
@@ -1135,196 +1128,6 @@ void LcdDisplay::ClearChatMessages() {
     }
 }
 #endif
-
-void LcdDisplay::CancelPreviewTimeout() {
-    DisplayLockGuard lock(this);
-    if (preview_timer_ != nullptr) {
-        // Keep the current preview on screen instead of auto-hiding after
-        // PREVIEW_IMAGE_DURATION_MS.
-        esp_timer_stop(preview_timer_);
-    }
-}
-
-std::unique_ptr<LvglImage> LcdDisplay::CreateCoverBackground(std::unique_ptr<LvglImage> src) {
-    if (src == nullptr) {
-        return nullptr;
-    }
-    const lv_img_dsc_t* dsc = src->image_dsc();
-    if (dsc == nullptr || dsc->data == nullptr || dsc->header.w <= 0 || dsc->header.h <= 0) {
-        ESP_LOGE(TAG, "CreateCoverBackground: invalid source image");
-        return nullptr;
-    }
-
-    const uint8_t* pixels = nullptr;
-    int sw = dsc->header.w;
-    int sh = dsc->header.h;
-    int sstride_bytes = dsc->header.stride;
-    bool source_argb = false;
-    bool decoder_open = false;
-    lv_image_decoder_dsc_t decoder_dsc = {};
-
-    if (dsc->header.cf == LV_COLOR_FORMAT_RGB565) {
-        pixels = dsc->data;
-        if (sstride_bytes <= 0) {
-            sstride_bytes = sw * 2;
-        }
-    } else if (IsPngData(dsc->data, dsc->data_size)) {
-        // PNG is decoded lazily by LVGL (lodepng -> ARGB8888). Decode it here,
-        // while the display lock is held, then cover-scale directly into RGB565.
-        lv_image_decoder_args_t args = {};
-        args.no_cache = true;
-        if (lv_image_decoder_open(&decoder_dsc, dsc, &args) != LV_RESULT_OK) {
-            ESP_LOGE(TAG, "CreateCoverBackground: PNG decode failed");
-            return nullptr;
-        }
-        decoder_open = true;
-        if (decoder_dsc.decoded == nullptr) {
-            ESP_LOGE(TAG, "CreateCoverBackground: PNG decode returned no pixels");
-            lv_image_decoder_close(&decoder_dsc);
-            return nullptr;
-        }
-        const lv_draw_buf_t* decoded = decoder_dsc.decoded;
-        if (decoded->header.cf != LV_COLOR_FORMAT_ARGB8888 || decoded->header.w <= 0 ||
-            decoded->header.h <= 0 || decoded->data == nullptr) {
-            ESP_LOGE(TAG, "CreateCoverBackground: unsupported PNG pixel format");
-            lv_image_decoder_close(&decoder_dsc);
-            return nullptr;
-        }
-        sw = decoded->header.w;
-        sh = decoded->header.h;
-        pixels = decoded->data;
-        sstride_bytes = decoded->header.stride > 0 ? decoded->header.stride : sw * 4;
-        source_argb = true;
-    } else {
-        ESP_LOGE(TAG, "CreateCoverBackground: unsupported source image");
-        return nullptr;
-    }
-
-    const int dw = LV_HOR_RES;
-    const int dh = LV_VER_RES;
-
-    // Cover: scale so the smaller relative dimension fills the screen, then
-    // center-crop the overflow. This is the standard wallpaper behavior.
-    const float scale_w = static_cast<float>(dw) / sw;
-    const float scale_h = static_cast<float>(dh) / sh;
-    const float scale = (scale_w > scale_h) ? scale_w : scale_h;
-
-    const int crop_x = static_cast<int>((sw * scale - dw) / 2.0f);
-    const int crop_y = static_cast<int>((sh * scale - dh) / 2.0f);
-
-    const size_t dest_len = static_cast<size_t>(dw) * dh * 2;
-    auto* dest = static_cast<uint16_t*>(heap_caps_malloc(dest_len, MALLOC_CAP_SPIRAM));
-    if (dest == nullptr) {
-        ESP_LOGE(TAG, "CreateCoverBackground: OOM (%zu bytes)", dest_len);
-        if (decoder_open) {
-            lv_image_decoder_close(&decoder_dsc);
-        }
-        return nullptr;
-    }
-
-    const int sstride_px = source_argb ? sstride_bytes / 4 : sstride_bytes / 2;
-    for (int y = 0; y < dh; ++y) {
-        int sy = static_cast<int>((crop_y + y) / scale);
-        if (sy < 0) sy = 0;
-        if (sy >= sh) sy = sh - 1;
-        for (int x = 0; x < dw; ++x) {
-            int sx = static_cast<int>((crop_x + x) / scale);
-            if (sx < 0) sx = 0;
-            if (sx >= sw) sx = sw - 1;
-            if (source_argb) {
-                // Composite transparent PNG pixels over black; fully opaque pixels
-                // keep their exact RGB values.
-                const auto* src32 = reinterpret_cast<const lv_color32_t*>(pixels);
-                const lv_color32_t c = src32[sy * sstride_px + sx];
-                const uint16_t r = static_cast<uint16_t>(c.red) * c.alpha / 255;
-                const uint16_t g = static_cast<uint16_t>(c.green) * c.alpha / 255;
-                const uint16_t b = static_cast<uint16_t>(c.blue) * c.alpha / 255;
-                dest[y * dw + x] = static_cast<uint16_t>(((r >> 3) << 11) | ((g >> 2) << 5) |
-                                                         (b >> 3));
-            } else {
-                const auto* src16 = reinterpret_cast<const uint16_t*>(pixels);
-                dest[y * dw + x] = src16[sy * sstride_px + sx];
-            }
-        }
-    }
-
-    if (decoder_open) {
-        lv_image_decoder_close(&decoder_dsc);
-    }
-
-    return std::make_unique<LvglAllocatedImage>(dest, dest_len, dw, dh, dw * 2,
-                                                LV_COLOR_FORMAT_RGB565);
-}
-
-bool LcdDisplay::SetBackgroundImage(std::unique_ptr<LvglImage> image) {
-    DisplayLockGuard lock(this);
-
-    auto bg = CreateCoverBackground(std::move(image));
-    if (bg == nullptr) {
-        ESP_LOGE(TAG, "SetBackgroundImage: failed to prepare wallpaper");
-        return false;
-    }
-
-    // Install on both themes so the wallpaper survives light/dark switches.
-    std::shared_ptr<LvglImage> shared_bg(std::move(bg));
-    auto& mgr = LvglThemeManager::GetInstance();
-    int installed = 0;
-    if (auto* light = mgr.GetTheme("light")) {
-        light->set_background_image(shared_bg);
-        ++installed;
-    }
-    if (auto* dark = mgr.GetTheme("dark")) {
-        dark->set_background_image(shared_bg);
-        ++installed;
-    }
-    if (installed == 0) {
-        ESP_LOGE(TAG, "SetBackgroundImage: no theme available");
-        return false;
-    }
-
-    // Re-apply the active theme so container_ picks up the new bg image.
-    if (current_theme_ != nullptr) {
-        SetTheme(current_theme_);
-    }
-    ESP_LOGI(TAG, "Wallpaper set");
-    return true;
-}
-
-void LcdDisplay::ClearBackgroundImage() {
-    DisplayLockGuard lock(this);
-    auto& mgr = LvglThemeManager::GetInstance();
-    if (auto* light = mgr.GetTheme("light")) {
-        light->set_background_image(nullptr);
-    }
-    if (auto* dark = mgr.GetTheme("dark")) {
-        dark->set_background_image(nullptr);
-    }
-    if (current_theme_ != nullptr) {
-        SetTheme(current_theme_);
-    }
-    ESP_LOGI(TAG, "Wallpaper cleared");
-}
-
-bool LcdDisplay::HasPreviewImage() {
-    DisplayLockGuard lock(this);
-    return preview_image_cached_ != nullptr;
-}
-
-bool LcdDisplay::HasBackgroundImage() {
-    DisplayLockGuard lock(this);
-    auto& mgr = LvglThemeManager::GetInstance();
-    if (auto* light = mgr.GetTheme("light")) {
-        if (light->background_image() != nullptr) {
-            return true;
-        }
-    }
-    if (auto* dark = mgr.GetTheme("dark")) {
-        if (dark->background_image() != nullptr) {
-            return true;
-        }
-    }
-    return false;
-}
 
 void LcdDisplay::SetEmotion(const char* emotion) {
     if (!setup_ui_called_) {

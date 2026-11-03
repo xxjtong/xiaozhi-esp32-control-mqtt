@@ -72,6 +72,8 @@ void Application::Initialize() {
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
     audio_service_.Start();
+    ESP_LOGI(TAG, "After board/audio init");
+    SystemInfo::PrintHeapStats();
 
     AudioServiceCallbacks callbacks;
     callbacks.on_send_queue_available = [this]() {
@@ -94,11 +96,6 @@ void Application::Initialize() {
     // Add state change listeners
     state_machine_.AddStateChangeListener([this](DeviceState old_state, DeviceState new_state) {
         xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
-        // One user<->assistant exchange: every entry into Speaking (wake greeting or a
-        // later turn). Counting these events gives the interaction count without VAD.
-        if (new_state == kDeviceStateSpeaking && old_state != kDeviceStateSpeaking) {
-            ReportUserEvent("interaction");
-        }
     });
 
     // Start the clock timer to update the status bar
@@ -328,10 +325,6 @@ void Application::HandleNetworkDisconnectedEvent() {
         protocol_->CloseAudioChannel();
     }
 
-    // The second control broker is intentionally left alone here: esp-mqtt's
-    // auto-reconnect takes over once the link returns, and it re-subscribes on
-    // OnConnected. Tearing it down would leave the control channel dead until reboot.
-
     // Update the status bar immediately to show the network state
     auto display = Board::GetInstance().GetDisplay();
     display->UpdateStatusBar(true);
@@ -345,20 +338,28 @@ void Application::HandleActivationDoneEvent() {
 
     has_server_time_ = ota_->HasServerTime();
 
-    auto display = Board::GetInstance().GetDisplay();
-    std::string message = std::string(Lang::Strings::VERSION) + ota_->GetCurrentVersion();
-    display->ShowNotification(message.c_str());
-    display->SetChatMessage("system", "");
+    // Protocol start may have already raised MAIN_EVENT_ERROR. Do not replace
+    // that alert with the "ready" UI/sound — the main loop can process both
+    // events back-to-back because the activation task is lower priority.
+    const bool has_error = !last_error_message_.empty();
+    if (!has_error) {
+        auto display = Board::GetInstance().GetDisplay();
+        std::string message = std::string(Lang::Strings::VERSION) + ota_->GetCurrentVersion();
+        display->ShowNotification(message.c_str());
+        display->SetChatMessage("system", "");
+    }
 
     // Release OTA object after activation is complete
     ota_.reset();
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
 
-    Schedule([this]() {
-        // Play the success sound to indicate the device is ready
-        audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
-    });
+    if (!has_error) {
+        Schedule([this]() {
+            // Play the success sound to indicate the device is ready
+            audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
+        });
+    }
 }
 
 void Application::ActivationTask() {
@@ -443,41 +444,26 @@ void Application::CheckNewVersion() {
     int retry_count = 0;
     int retry_delay = 10;  // Initial retry delay in seconds
 
-    // 如果 MQTT/WebSocket 配置已在 NVS 里（设备已激活过），
-    // 直接跳过版本检查和激活流程，加速启动。
-    {
-        Settings mqtt_settings("mqtt", false);
-        Settings ws_settings("websocket", false);
-        bool has_mqtt = !mqtt_settings.GetString("endpoint").empty();
-        bool has_ws = !ws_settings.GetString("url").empty();
-        if (has_mqtt || has_ws) {
-            ESP_LOGI(TAG, "Skipping version check: protocol config already exists in NVS");
-            has_server_time_ = false;
-            return;
-        }
-        ESP_LOGI(TAG, "No protocol config in NVS, running version check/activation");
-    }
-
     auto& board = Board::GetInstance();
     while (true) {
         auto display = board.GetDisplay();
         display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
 
-        esp_err_t err = ota_->CheckVersion();
-        if (err != ESP_OK) {
+        auto check = ota_->CheckVersion();
+        if (!check) {
             retry_count++;
             if (retry_count >= MAX_RETRY) {
                 ESP_LOGE(TAG, "Too many retries, exit version check");
                 return;
             }
 
-            char error_message[128];
+            const auto& err = check.error();
+            char error_message[160];
             int error_message_length =
-                snprintf(error_message, sizeof(error_message), "code=%d, url=%s", err,
-                         ota_->GetCheckVersionUrl().c_str());
+                snprintf(error_message, sizeof(error_message), "%s", err.ToString().c_str());
             if (error_message_length < 0 ||
                 error_message_length >= static_cast<int>(sizeof(error_message))) {
-                snprintf(error_message, sizeof(error_message), "code=%d", err);
+                snprintf(error_message, sizeof(error_message), "%s", err.Message());
             }
 
             char buffer[320];
@@ -486,7 +472,7 @@ void Application::CheckNewVersion() {
                          retry_delay, error_message);
             if (alert_message_length < 0 ||
                 alert_message_length >= static_cast<int>(sizeof(buffer))) {
-                snprintf(buffer, sizeof(buffer), "code=%d", err);
+                snprintf(buffer, sizeof(buffer), "%s", err.Message());
             }
             Alert(Lang::Strings::ERROR, buffer, "cloud_off", Lang::Sounds::OGG_EXCLAMATION);
 
@@ -503,6 +489,13 @@ void Application::CheckNewVersion() {
         }
         retry_count = 0;
         retry_delay = 10;  // Reset retry delay
+
+        if (ota_->HasNewVersion()) {
+            if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
+                return;  // This line will never be reached after reboot
+            }
+            // If upgrade failed, continue to normal operation
+        }
 
         // No new version, mark the current version as valid
         ota_->MarkCurrentVersionValid();
@@ -730,11 +723,6 @@ void Application::InitializeProtocol() {
     });
 
     protocol_->Start();
-
-    // Start the second MQTT broker (pure control-plane, no UDP audio).
-    // No config in NVS? Start() quietly does nothing.
-    control_mqtt_ = std::make_unique<ControlMqtt>();
-    control_mqtt_->Start();
 }
 
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -774,6 +762,7 @@ void Application::Alert(const char* status, const char* message, const char* emo
 }
 
 void Application::DismissAlert() {
+    last_error_message_.clear();
     if (GetDeviceState() == kDeviceStateIdle) {
         auto display = Board::GetInstance().GetDisplay();
         display->SetStatus(Lang::Strings::STANDBY);
@@ -784,15 +773,7 @@ void Application::DismissAlert() {
 
 void Application::ToggleChatState() { xEventGroupSetBits(event_group_, MAIN_EVENT_TOGGLE_CHAT); }
 
-void Application::StartListening() { StartListening(kListeningModeManualStop); }
-
-void Application::StartListening(ListeningMode mode) {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        pending_listening_mode_ = mode;
-    }
-    xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
-}
+void Application::StartListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING); }
 
 void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING); }
 
@@ -800,11 +781,7 @@ void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
 
     if (state == kDeviceStateNotifying) {
-        // A local toggle (BOOT key) stops the broadcast on purpose, so report
-        // outcome=user_stopped. A remote "listen start" also lands here, but
-        // ControlMqtt::HandleListen() pre-sets cancel_requested_, which takes
-        // precedence, so it is still reported as cancelled.
-        StopNotificationByUser();
+        StopNotification();
         state = kDeviceStateIdle;
     }
 
@@ -868,10 +845,7 @@ void Application::HandleStartListeningEvent() {
     auto state = GetDeviceState();
 
     if (state == kDeviceStateNotifying) {
-        // Every current caller is a local gesture (button / touch / IMU), so this
-        // counts as a user stop. Remote requests go through listen/abort_notify,
-        // which pre-set cancel_requested_ and outrank this flag.
-        StopNotificationByUser();
+        StopNotification();
         state = kDeviceStateIdle;
     }
 
@@ -889,24 +863,17 @@ void Application::HandleStartListeningEvent() {
         return;
     }
 
-    // Use the mode StartListening() was called with (defaults to manual stop).
-    ListeningMode mode;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        mode = pending_listening_mode_;
-    }
-
     if (state == kDeviceStateIdle) {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
-            Schedule([this, mode]() { ContinueOpenAudioChannel(mode); });
+            Schedule([this]() { ContinueOpenAudioChannel(kListeningModeManualStop); });
             return;
         }
-        SetListeningMode(mode);
+        SetListeningMode(kListeningModeManualStop);
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
-        SetListeningMode(mode);
+        SetListeningMode(kListeningModeManualStop);
     }
 }
 
@@ -935,7 +902,6 @@ void Application::HandleWakeWordDetectedEvent() {
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
-    ReportUserEvent("wake_word");
 
     if (state == kDeviceStateIdle) {
         BeginWakeWordInvoke(wake_word);
@@ -1041,9 +1007,15 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
-            display->SetStatus(Lang::Strings::STANDBY);
-            display->ClearChatMessages();    // Clear messages first
-            display->SetEmotion("neutral");  // Then set emotion (wechat mode checks child count)
+            // Keep a just-raised network error visible. SetDeviceState(idle)
+            // queues STATE_CHANGED after Alert(), and the idle handler would
+            // otherwise wipe the status, emotion, and chat message.
+            if (last_error_message_.empty()) {
+                display->SetStatus(Lang::Strings::STANDBY);
+                display->ClearChatMessages();  // Clear messages first
+                display->SetEmotion(
+                    "neutral");  // Then set emotion (wechat mode checks child count)
+            }
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;
@@ -1093,11 +1065,6 @@ void Application::HandleStateChangedEvent() {
         default:
             // Do nothing
             break;
-    }
-
-    // Mirror state change to the second control broker (optional session_update).
-    if (control_mqtt_ && control_mqtt_->IsConnected()) {
-        control_mqtt_->BroadcastState(DeviceStateToString(new_state));
     }
 }
 
@@ -1188,19 +1155,6 @@ void Application::StopNotification() {
     }
 }
 
-void Application::StopNotificationByUser() {
-    if (GetDeviceState() != kDeviceStateNotifying) {
-        return;
-    }
-    ESP_LOGI(TAG, "Notification stopped by user request");
-    // Let the control channel report outcome=user_stopped before the state leaves
-    // "notifying" (TrackNotificationState runs inside SetDeviceState below).
-    if (control_mqtt_ != nullptr) {
-        control_mqtt_->MarkNotificationUserStopped();
-    }
-    StopNotification();
-}
-
 void Application::HandleNotificationFinished(uint32_t playback_id, bool success) {
     if (GetDeviceState() != kDeviceStateNotifying || notification_playback_id_ != playback_id) {
         return;
@@ -1216,19 +1170,6 @@ void Application::Schedule(std::function<void()>&& callback) {
         main_tasks_.push_back(std::move(callback));
     }
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
-}
-
-void Application::ReportUserEvent(const std::string& event, const std::string& value) {
-    if (control_mqtt_ == nullptr) {
-        return;
-    }
-    // Capture the state as it is when the user acts, not when the task finally runs.
-    std::string state = DeviceStateToString(GetDeviceState());
-    Schedule([this, event, value, state]() {
-        if (control_mqtt_ != nullptr) {
-            control_mqtt_->BroadcastEvent(event, value, state);
-        }
-    });
 }
 
 void Application::AbortSpeaking(AbortReason reason) {
