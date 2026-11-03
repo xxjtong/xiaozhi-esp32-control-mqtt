@@ -209,13 +209,16 @@ void ControlMqtt::ConnectTask() {
     }
 
     ESP_LOGI(TAG, "Connecting to control broker %s:%d", host.c_str(), port);
-    bool ok = mqtt_->Connect(host, port, broker_client_id_, broker_username_, broker_password_);
-    if (ok) {
+    // Upstream 2.5.x: Mqtt::Connect returns NetworkResult<> instead of bool.
+    auto connect_result =
+        mqtt_->Connect(host, port, broker_client_id_, broker_username_, broker_password_);
+    if (connect_result) {
         ESP_LOGI(TAG, "Control broker connect returned OK");
     } else {
         // Keep the client alive: esp-mqtt's auto-reconnect keeps retrying and will
         // fire OnConnected once the broker becomes reachable again.
-        ESP_LOGW(TAG, "Control broker connect failed — esp-mqtt will keep retrying");
+        ESP_LOGW(TAG, "Control broker connect failed (%s) — esp-mqtt will keep retrying",
+                 connect_result.error().ToString().c_str());
     }
 
     {
@@ -776,13 +779,13 @@ void ControlMqtt::HandleSetImage(cJSON* root) {
     // floating preview and any wallpaper set with mode=background).
     auto clear_j = cJSON_GetObjectItem(root, "clear");
     if (cJSON_IsTrue(clear_j)) {
-        auto* lvgl_display = dynamic_cast<LvglDisplay*>(Board::GetInstance().GetDisplay());
-        if (lvgl_display == nullptr) {
-            SendReply("set_image", false, "", MakeErrorExtra("no LVGL display"));
+        auto* display = Board::GetInstance().GetDisplay();
+        if (display == nullptr) {
+            SendReply("set_image", false, "", MakeErrorExtra("no display"));
             return;
         }
-        lvgl_display->SetPreviewImage(nullptr);
-        lvgl_display->ClearBackgroundImage();
+        display->SetPreviewImage(nullptr);
+        display->ClearBackgroundImage();
         SendReply("set_image", true);
         return;
     }
@@ -792,8 +795,8 @@ void ControlMqtt::HandleSetImage(cJSON* root) {
         SendReply("set_image", false);
         return;
     }
-    if (dynamic_cast<LvglDisplay*>(Board::GetInstance().GetDisplay()) == nullptr) {
-        ESP_LOGW(TAG, "set_image: no LVGL display available");
+    if (Board::GetInstance().GetDisplay() == nullptr) {
+        ESP_LOGW(TAG, "set_image: no display available");
         SendReply("set_image", false);
         return;
     }
@@ -848,13 +851,19 @@ void ControlMqtt::ImageFetchTaskEntry(void* arg) {
             break;
         }
         http->SetTimeout(10000);
-        if (!http->Open("GET", args->url)) {
-            ESP_LOGE(TAG, "HTTP open failed: %d", http->GetLastError());
+        if (auto opened = http->Open("GET", args->url); !opened) {
+            ESP_LOGE(TAG, "HTTP open failed: %s", opened.error().ToString().c_str());
             fail_reason = "http open failed";
             break;
         }
-        if (http->GetStatusCode() != 200) {
-            ESP_LOGE(TAG, "HTTP status %d", http->GetStatusCode());
+        auto status_code = http->GetStatusCode();
+        if (!status_code) {
+            ESP_LOGE(TAG, "HTTP status read failed: %s", status_code.error().ToString().c_str());
+            fail_reason = "http status unavailable";
+            break;
+        }
+        if (*status_code != 200) {
+            ESP_LOGE(TAG, "HTTP status %d", *status_code);
             fail_reason = "http status is not 200";
             break;
         }
@@ -871,11 +880,11 @@ void ControlMqtt::ImageFetchTaskEntry(void* arg) {
             break;
         }
         while (total < content_length) {
-            int ret = http->Read(data + total, content_length - total);
-            if (ret <= 0) {
+            auto ret = http->Read(data + total, content_length - total);
+            if (!ret || *ret <= 0) {
                 break;
             }
-            total += ret;
+            total += static_cast<size_t>(*ret);
         }
         if (total < content_length) {
             ESP_LOGE(TAG, "Incomplete download: %zu/%zu", total, content_length);
@@ -969,14 +978,16 @@ void ControlMqtt::ImageFetchTaskEntry(void* arg) {
             self->SendReply("set_image", false, "", MakeErrorExtra(p->error));
             return;
         }
-        auto* lvgl_display = dynamic_cast<LvglDisplay*>(Board::GetInstance().GetDisplay());
-        if (lvgl_display == nullptr) {
+        // -fno-rtti: no dynamic_cast. The preview/wallpaper hooks live on Display now,
+        // so a base pointer is enough and non-LVGL displays simply no-op.
+        auto* display = Board::GetInstance().GetDisplay();
+        if (display == nullptr) {
             heap_caps_free(p->data);
             p->data = nullptr;
-            self->SendReply("set_image", false, "", MakeErrorExtra("no LVGL display"));
+            self->SendReply("set_image", false, "", MakeErrorExtra("no display"));
             return;
         }
-        try {
+        {
             std::unique_ptr<LvglImage> image;
             if (p->rgb565) {
                 image = std::make_unique<LvglAllocatedImage>(p->data, p->len, p->width, p->height,
@@ -986,6 +997,14 @@ void ControlMqtt::ImageFetchTaskEntry(void* arg) {
             }
             // LvglAllocatedImage takes ownership of the buffer.
             p->data = nullptr;
+            // Upstream 2.5.0 removed the constructor's throw (C++ exceptions are
+            // disabled); an undecodable buffer yields an invalid image instead.
+            auto* allocated = static_cast<LvglAllocatedImage*>(image.get());
+            if (allocated == nullptr || !allocated->IsValid()) {
+                ESP_LOGE(TAG, "Unsupported image data");
+                self->SendReply("set_image", false, "", MakeErrorExtra("unsupported image data"));
+                return;
+            }
             // Backstop for formats whose size cannot be read from the header
             // (JPEG/PNG are already checked before decoding).
             auto* dsc = image->image_dsc();
@@ -995,7 +1014,7 @@ void ControlMqtt::ImageFetchTaskEntry(void* arg) {
                 return;
             }
             if (p->is_background) {
-                if (!lvgl_display->SetBackgroundImage(std::move(image))) {
+                if (!display->SetBackgroundImage(std::move(image))) {
                     // The display consumed the image and could not convert it
                     // (unsupported format or out of memory); report a real failure.
                     self->SendReply("set_image", false, "",
@@ -1004,21 +1023,13 @@ void ControlMqtt::ImageFetchTaskEntry(void* arg) {
                 }
                 ESP_LOGI(TAG, "Image applied as wallpaper");
             } else {
-                lvgl_display->SetPreviewImage(std::move(image));
+                display->SetPreviewImage(std::move(image));
                 // Upstream auto-hides previews after 5s; a remote screen image should stay
                 // until it is replaced or cleared.
-                lvgl_display->CancelPreviewTimeout();
+                display->CancelPreviewTimeout();
                 ESP_LOGI(TAG, "Image applied as preview; it stays until replaced or cleared");
             }
             self->SendReply("set_image", true);
-        } catch (const std::exception& e) {
-            // The constructor does not take ownership when it throws.
-            ESP_LOGE(TAG, "Unsupported image data: %s", e.what());
-            if (p->data != nullptr) {
-                heap_caps_free(p->data);
-                p->data = nullptr;
-            }
-            self->SendReply("set_image", false, "", MakeErrorExtra(e.what()));
         }
     });
 
@@ -1264,10 +1275,8 @@ void ControlMqtt::HandleQueryStatus(cJSON* root) {
         if (auto* theme = display->GetTheme()) {
             cJSON_AddStringToObject(extra, "theme", theme->name().c_str());
         }
-        if (auto* lvgl_display = dynamic_cast<LvglDisplay*>(display)) {
-            cJSON_AddBoolToObject(extra, "preview_active", lvgl_display->HasPreviewImage());
-            cJSON_AddBoolToObject(extra, "wallpaper_active", lvgl_display->HasBackgroundImage());
-        }
+        cJSON_AddBoolToObject(extra, "preview_active", display->HasPreviewImage());
+        cJSON_AddBoolToObject(extra, "wallpaper_active", display->HasBackgroundImage());
     }
     if (auto* codec = board.GetAudioCodec()) {
         cJSON_AddNumberToObject(extra, "volume", codec->output_volume());

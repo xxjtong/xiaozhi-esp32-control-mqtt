@@ -38,6 +38,8 @@ public:
     virtual void SetChatMessage(const char* role, const char* content) override;
     virtual void SetEmotion(const char* emotion) override;
     virtual void SetTheme(Theme* theme) override;
+    // Upstream 2.5.0: turn the OLED panel off in power save mode.
+    void SetPowerSaveMode(bool on) override;
 };
 
 #endif  // OLED_DISPLAY_H

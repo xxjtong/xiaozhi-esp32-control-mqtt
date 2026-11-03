@@ -19,6 +19,11 @@ Display::~Display() {}
 
 void Display::SetPreviewImage(std::unique_ptr<LvglImage> image) {}
 
+bool Display::SetBackgroundImage(std::unique_ptr<LvglImage> image) {
+    (void)image;
+    return false;
+}
+
 void Display::SetStatus(const char* status) { ESP_LOGW(TAG, "SetStatus: %s", status); }
 
 void Display::SetStatusColor(uint32_t rgb) { (void)rgb; }

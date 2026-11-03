@@ -1,5 +1,31 @@
 menu "Xiaozhi Assistant"
 
+menu "Control MQTT (second broker)"
+
+config CONTROL_MQTT_ENDPOINT
+    string "Control broker endpoint (host:port)"
+    default "mqtt.virsical.cn:21883"
+    help
+        Second MQTT broker used as a control plane (no audio, no xiaozhi.me session).
+        Format: host:port. Port 8883 selects TLS, anything else uses plain TCP.
+        Leave empty to disable the control channel.
+        A value stored in NVS (namespace "control_mqtt", key "endpoint") overrides this.
+
+config CONTROL_MQTT_USERNAME
+    string "Control broker username"
+    default "admin"
+    help
+        Overridden by NVS key "username" in namespace "control_mqtt" when set.
+
+config CONTROL_MQTT_PASSWORD
+    string "Control broker password"
+    default "public"
+    help
+        Overridden by NVS key "password" in namespace "control_mqtt" when set.
+
+endmenu
+
+
 config OTA_URL
     string "Default OTA URL"
     default "https://api.tenclass.net/xiaozhi/ota/"

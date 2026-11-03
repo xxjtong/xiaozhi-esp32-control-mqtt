@@ -77,6 +77,13 @@ public:
     }
     virtual void LoadAssets() {}
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image);
+    // Preview / wallpaper capabilities. Displays without such a layer keep the
+    // defaults, so callers (control channel) need no downcast.
+    virtual void CancelPreviewTimeout() {}
+    virtual bool SetBackgroundImage(std::unique_ptr<LvglImage> image);
+    virtual void ClearBackgroundImage() {}
+    virtual bool HasPreviewImage() { return false; }
+    virtual bool HasBackgroundImage() { return false; }
     virtual bool SetTextFont(std::shared_ptr<LvglFont> text_font) {
         (void)text_font;
         return false;
