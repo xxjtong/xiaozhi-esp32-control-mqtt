@@ -128,3 +128,50 @@ env -u PYTHONPATH -u BASH_ENV <python> scripts/build.py ...
 | 分区余量 30%，够放下后续定制 | — |
 
 **下一步（S3）**：在真实仓库搭 2.5.2 骨架（`PROJECT_VER=2.5.2.1`、依赖用上游、清 `sdkconfig*` 与 `managed_components`），再用同样的命令编译，确认骨架与 S2 结果一致，然后才开始 P2~P6 搬定制。
+
+---
+
+## 6. S3 骨架复核（2026-11-03 17:20–17:40）
+
+在**真实仓库**（`migrate/2.5.2` 分支）上把工作树替换为纯上游 2.5.2，验证骨架与 S2 一致。
+
+### 6.1 提交内容
+
+```
+f5dd773 build: adopt upstream 2.5.2 tree as migration skeleton
+  81 新增   42 删除   116 修改
+```
+
+| 动作 | 说明 |
+|---|---|
+| 工作树替换 | 42 个 fork 独有文件移除、116 个文件更新、26 个上游新文件采纳 |
+| `PROJECT_VER` | `2.5.2` → **`2.5.2.1`** |
+| `.gitignore` | 保留 `build_4b/`、`/backup/`、`.workbuddy/` |
+| 旧构建状态 | `managed_components/`、`sdkconfig`、`sdkconfig.old`、`dependencies.lock` 移出到 `/tmp/stale-2.4.2.1/`（762 MB，未删除） |
+
+fork 的全部定制保留在 tag `fork-2.4.2.1` 与 `backup/fork-2.4.2.1/`。
+
+### 6.2 结果：与 S2 逐字节一致
+
+| 板型 | S2（`/tmp/up252`） | S3（真实仓库） | 一致 |
+|---|---|---|---|
+| `esp32-s3-touch-lcd-3.49-v2` | `0x2bcd50`（2,870,608 B） | `0x2bcd50` | ✅ |
+| `esp32-s3-touch-lcd-4b` | `0x2bf550`（2,884,944 B） | `0x2bf550` | ✅ |
+| 宿主单测 | 110 tests OK | 110 tests OK | ✅ |
+| 组件数 | 74 | 73（`mqtt` 并入） | 等价 |
+
+**产物大小完全相同**说明骨架没有引入任何差异——这正是 S3 要证明的事。
+
+### 6.3 顺带修正的一个习惯
+
+`dependencies.lock`（34,345 B，73 个组件精确版本）此前被 `.gitignore:10` 忽略。本次已从忽略列表移除并纳入版本控制——这是获得"可复现构建"的唯一手段（见评估文档 10.3）。
+
+### 6.4 当前分支状态
+
+```
+migrate/2.5.2  f5dd773  build: adopt upstream 2.5.2 tree as migration skeleton
+               44cd7f3  docs: S2 baseline gate passed, record toolchain constraints
+main           3b3df76  chore: freeze fork 2.4.2.1 worktree before 2.5.2 migration  (tag: fork-2.4.2.1)
+```
+
+回退随时可用：`git checkout main`（回到 2.4.2.1）或 `git checkout fork-2.4.2.1 -- <任意文件>`（单文件取回）。

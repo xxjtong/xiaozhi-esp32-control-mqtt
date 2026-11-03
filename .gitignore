@@ -7,7 +7,6 @@ dist/
 .devcontainer/
 sdkconfig.old
 sdkconfig
-dependencies.lock
 .env
 releases/
 main/assets/lang_config.h
