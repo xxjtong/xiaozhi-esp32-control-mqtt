@@ -175,3 +175,94 @@ main           3b3df76  chore: freeze fork 2.4.2.1 worktree before 2.5.2 migrati
 ```
 
 回退随时可用：`git checkout main`（回到 2.4.2.1）或 `git checkout fork-2.4.2.1 -- <任意文件>`（单文件取回）。
+
+---
+
+## 7. S4 定制回植（2026-11-03 17:45–21:10）
+
+### 7.1 做法：三路合并 + 分块决策
+
+没有逐文件手抄，而是复用事先建好的三支仓库（`base=2.4.2` / `upstream=2.5.2` / `fork=2.4.2.1`）做真实 `git merge`：git 自动合并 90 个文件，只对 17 个文件 / 29 个冲突块做人工判断。
+
+| 决策 | 文件 | 理由 |
+|---|---|---|
+| **取上游** | `ota.cc`、`mqtt_protocol.{cc,h}`、`lvgl_theme.cc`、`idf_component.yml`、`esp_video.cc`、`otto_robot.cc`、`Kconfig`、CI workflow、`notify_player.cc` | 本地改动已被上游等价实现吸收，或属纯格式差异 |
+| **保留本地** | `StopNotificationByUser` 语义（application.cc 3 块）、`OledDisplay` 的 `swap_xy`、`notify.md` 的 fork 章节 | 上游没有对应能力 |
+| **两边都留** | `lvgl_display.h`（`override` + 5 个新虚函数） | 互不冲突 |
+| **手工逐块** | `application.cc`（5 块：前 2 块取上游 OTA `expected<>`，后 3 块保留 fork 播报语义） | 两种语义叠加 |
+
+合并后立即校验，确认三个关键点没被"静默修回去"：
+
+```
+StopNotificationByUser     3 处   ← 保留
+check.error()              1 处   ← 采纳上游 expected API
+HasNewVersion              0 处   ← 自动 OTA 仍禁用（关键）
+Skipping version check     1 处   ← fork 的启动加速仍在
+```
+
+### 7.2 四轮编译错误与修复（这是本次迁移的核心工作量）
+
+| 轮次 | 错误 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | `no declaration matches 'void OledDisplay::SetPowerSaveMode(bool)'` | 我把 `oled_display.h` 整文件取了本地版，丢掉 2.5.2 新增的 override 声明 | 补回声明（`swap_xy` 与 `SetPowerSaveMode` 并存） |
+| 2 | 链接期 `undefined reference to ControlMqtt::*` | 自动合并时 `main/CMakeLists.txt` 丢了 `control_mqtt.cc` 条目；`Kconfig` 被我整文件取上游，`CONTROL_MQTT_*` 全丢 | 补 `control_mqtt.cc` 到源列表，重新插入 Control MQTT 菜单 |
+| 3 | `Http has no member GetLastError`、`cannot convert NetworkResult<int> to int`、`dynamic_cast not permitted with -fno-rtti`、`exception handling disabled` | **2.5.2 的三项架构性变更**：Http 全面改 `std::expected`；关闭 RTTI；关闭 C++ 异常 | 见 7.3 |
+| 4 | `cannot convert NetworkResult<> to bool`（`Mqtt::Connect`） | 同上的 `expected` 化，`Connect` 也改了签名 | 改为判断 `expected` 并打印 `error().ToString()` |
+
+**第 3 轮印证了评估文档 5.2 节的预判**：这三个变更不是"冲突"，而是编译期才暴露的 API 断裂。
+
+### 7.3 `control_mqtt.cc` 的四处适配
+
+| 原写法（2.4.2 时代） | 2.5.2 写法 |
+|---|---|
+| `if (!http->Open(...))` + `GetLastError()` | `if (auto r = http->Open(...); !r)` + `r.error().ToString()` |
+| `if (http->GetStatusCode() != 200)` | `auto st = http->GetStatusCode(); if (!st) …; if (*st != 200) …` |
+| `int ret = http->Read(...)` | `auto ret = http->Read(...); if (!ret \|\| *ret <= 0) break;` |
+| `bool ok = mqtt_->Connect(...)` | `auto r = mqtt_->Connect(...); if (r) … else r.error().ToString()` |
+| `dynamic_cast<LvglDisplay*>(display)` ×4 | 把 `CancelPreviewTimeout` / `SetBackgroundImage` / `ClearBackgroundImage` / `HasPreviewImage` / `HasBackgroundImage` **上提到 `Display` 基类**（默认 no-op），调用方用基类指针，无需 RTTI |
+| `try { … } catch (const std::exception& e)` | 去掉。`LvglAllocatedImage` 不再抛异常，改用新增的 `IsValid()` 判断 |
+
+> 把接口上提到 `Display` 是最干净的一步：非 LVGL 显示（Emote）自动退化为 no-op，比 `static_cast` 安全，也比 `#ifdef` 干净。
+
+### 7.4 一处刻意的上游测试偏离
+
+上游 2.5.2 新增策略测试 `test_language_and_wake_word_are_not_board_config_options`，禁止在 `config.json` 里写 `CONFIG_SR_WN_*` / `CONFIG_LANGUAGE_*`，要求走 `--wake-word` 或 menuconfig。
+
+但"你好，小威"是**自定义唤醒短语**，`--wake-word` 只接受 esp-sr 预置模型，无法表达。因此：
+
+- 保留两个板型 `config.json` 中的唤醒词配置；
+- 在测试里加了**作用域限定到这两个板**的例外，并写明理由。
+
+升级上游时若这条测试改动，需要重新评估——这是 fork 唯一主动偏离的上游规则。
+
+### 7.5 结果
+
+| 板型 | S3 骨架（无定制） | S4 定制版 | 增量 | 分区余量 |
+|---|---|---|---|---|
+| `esp32-s3-touch-lcd-3.49-v2` | `0x2bcd50`（30%） | **`0x2db240`** | +0x1E4F0（约 121 KB） | **27%** |
+| `esp32-s3-touch-lcd-4b` | `0x2bf550`（30%） | **`0x2da290`** | +0x1AD40（约 107 KB） | **28%** |
+| 宿主单测 | 110 OK | **110 OK** | — | — |
+
+定制只吃掉约 3 个百分点的分区余量——因为 2.5.2 关掉异常与 RTTI 省下的空间（约 200 KB）正好抵掉了大部分定制体积。
+
+### 7.6 尚未验证的部分
+
+编译通过 ≠ 可用。以下必须真机验证（清单见 `customization-inventory.md` 第 7.3 节）：
+
+1. **QSPI 显示链路**（3.49-V2 手写 flush + 6.1 的 LCD 色彩层）——最可能出问题的一项；
+2. **AFE `LOW_COST` + `AEC_MODE_FD_LOW_COST` 的实际回声表现**；
+3. 控制通道 15 条指令逐条过；
+4. 播报闭环 5 种 `outcome`；
+5. IMU / RTC / 电池 / 背光守护 / 显示使能守护；
+6. **自动 OTA 必须仍关闭**。
+
+### 7.7 分支状态
+
+```
+migrate/2.5.2  d14c229  fix: adapt fork code to 2.5.2 APIs
+               76c7baa  feat: re-apply fork customizations on upstream 2.5.2
+               b18e5ed  build: track dependencies.lock for reproducible builds
+               f5dd773  build: adopt upstream 2.5.2 tree as migration skeleton
+               44cd7f3  docs: S2 baseline gate passed
+main           3b3df76  chore: freeze fork 2.4.2.1 worktree  (tag: fork-2.4.2.1)
+```
