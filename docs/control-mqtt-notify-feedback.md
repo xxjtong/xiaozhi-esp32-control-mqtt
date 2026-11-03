@@ -295,7 +295,7 @@ if (control_mqtt_ && control_mqtt_->IsConnected()) {
 复查中排除的两个疑似问题（无需改）：
 
 - `preview_viewport_` 与 `container_` 各挂了一份点击回调，怀疑一次点击触发两次导致单击被判成双击 —— 查证 `preview_viewport_ = lv_obj_create(screen)`（`lcd_display.cc:880`）与 `container_` 是**兄弟节点**，`EnableEventBubbling(container_)` 不会波及它，也不存在冒泡，故不会重复计数。
-- 播报时喇叭自身振动可能越过 IMU 的 0.1 g 阈值导致播报被自己打断 —— 实测用例 9，未复现。
+- 播报时喇叭自身振动可能越过 IMU 的 0.1 g 阈值导致播报被自己打断 —— 实测用例 9，未复现。（阈值已于 2026-10-26 晚上调到 0.25 g，此结论只会更宽松。）
 
 ****用例 5 的关键前置**：唤醒词是**「你好，小威」**（`CONFIG_CUSTOM_WAKE_WORD="ni hao xiao wei"`、
 `CONFIG_CUSTOM_WAKE_WORD_DISPLAY="你好，小威"`），不是默认的「你好小智」。首次测试失败就是因为

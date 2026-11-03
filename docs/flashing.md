@@ -1,11 +1,14 @@
 # 固件烧录与真机验证
 
-针对本 fork（`waveshare/esp32-s3-touch-lcd-3.49-v2`）的烧录流程。所有命令均在
+针对本 fork 主力板型（`waveshare/esp32-s3-touch-lcd-3.49-v2`）的烧录流程。所有命令均在
 macOS + ESP-IDF v6.0.2 上实测通过。
 
 > **厂家文档**：硬件规格、原理图、示例与排查手册见
 > <https://docs.waveshare.net/ESP32-S3-Touch-LCD-3.49/>（完整链接清单见 §10）。
 > 本文档只记录本项目相关的烧录要点，硬件细节以厂家文档为准。
+>
+> **另一板型**：4 英寸 480×480 的 `esp32-s3-touch-lcd-4b` 见 §11（烧录偏移完全相同，
+> 但固件互不通用）。
 
 ---
 
@@ -293,3 +296,117 @@ I (47459) ControlMqtt: hello sent
 | 播报闭环改造（notify 反馈） | `docs/control-mqtt-notify-feedback.md` |
 | 远程语音播报服务端设计评估 | `docs/tts-broadcast-design.md` |
 | 自定义板型开发指南 | `docs/custom-board.md` |
+
+---
+
+## 11. 另一板型：ESP32-S3-Touch-LCD-4B（480×480）
+
+2026-10-26 首次为 4B 出固件。**烧录偏移、Flash 参数、NVS 保留策略与 §4/§5 完全一致**，
+差别只在硬件与板级代码。
+
+### 11.1 硬件对照
+
+厂家文档：<https://docs.waveshare.net/ESP32-S3-Touch-LCD-4b>
+
+| 项 | 3.49-V2（主力） | **4B** |
+|---|---|---|
+| 主控 / 存储 | ESP32-S3R8 / 16 MB Flash + 8 MB PSRAM | 同 |
+| 屏幕 | 3.49" 172×640，AXS15231B（QSPI） | **4" 480×480，ST7701（RGB 16 位并口）** |
+| 触摸 | AXS15231B 一体 | **GT911（I2C，无 INT/RST 引脚）** |
+| 背光 | `GPIO_NUM_8` | **`GPIO_NUM_4`（反相）** |
+| 音频 | ES8311 + ES7210，I2C 在 47/48 | 同（`AUDIO_INPUT_REFERENCE=true`） |
+| IMU / RTC | QMI8658 / PCF85063 | **同（但当前固件未接驱动）** |
+| 电源管理 | 无 PMIC | **AXP2101（0x34，含电池充放电）** |
+| IO 扩展 | TCA9554（000） | TCA9554PWR，地址同为 `000`，但用于 LCD 3-wire SPI（CS/SCL/SDA = P0/P2/P1） |
+| 侧面按键 | BOOT / PWR / RESET | **BOOT（GPIO0）/ PWR（经 TCA9554 P4 轮询）** |
+| 面板初始化 | LCD 自带 | 需经 TCA9554 拉 P3/P5/P6 完成 ST7701 上电时序 |
+
+### 11.2 编译
+
+```sh
+cd /Users/tong/Downloads/xiaozhi-esp32-main
+export PATH=/opt/homebrew/bin:$PATH
+source /Users/tong/.espressif/v6.0.2/esp-idf/export.sh
+
+# 生成板型专属 sdkconfig 片段（写入 build/xiaozhi-build.sdkconfig.defaults）
+python3 scripts/build.py waveshare/esp32-s3-touch-lcd-4b --name esp32-s3-touch-lcd-4b
+
+# 配置 + 编译（idf.py 的 build/log 报错规避手段见 §3）
+mv build/log /tmp/idf_log_$(date +%s) 2>/dev/null
+IDF_COMPONENT_SUPPRESS_UNKNOWN_FILE_WARNINGS=1 idf.py -DIDF_TARGET=esp32s3 \
+  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;build/xiaozhi-build.sdkconfig.defaults" \
+  -DBOARD_NAME=esp32-s3-touch-lcd-4b build
+```
+
+编译末尾确认：
+
+```
+xiaozhi.bin binary size 0x2efb20 bytes. Smallest app partition is 0x3f0000 bytes. 0x1004e0 bytes (25%) free.
+```
+
+> 若 `idf.py build` 再次报 `build/log` 的 `PermissionError(EEXIST)`，改用
+> `cd build && ninja all`（先跑一次 `idf.py … reconfigure` 让 CMake 重新 GLOB 板级源码）。
+
+`build.py` 会**改写本地 `sdkconfig`**，切到 4B 后 `sdkconfig` 里的
+`CONFIG_BOARD_TYPE_*` 就是 4B；要回 3.49-V2 必须重新跑一遍 `build.py` 再编译，
+不能直接复用当前 `build/`。
+
+如果切换板型时组件管理器要求替换 `managed_components/` 里的旧版本（安全删除被拦截），
+把待替换的组件目录 `mv` 到 `/tmp` 备份即可，重新配置时会自动按 `dependencies.lock`
+拉取新版本，避免原地删除。
+
+### 11.3 产物
+
+`dist/esp32-s3-touch-lcd-4b/`：
+
+| 文件 | 说明 |
+|---|---|
+| `xiaozhi.bin` | app（`0x2efb20`），刷 `0x20000` |
+| `bootloader.bin` / `partition-table.bin` / `ota_data_initial.bin` | 全量烧录用 |
+| `generated_assets.bin` | 字体与音效资源，刷 `0x800000` |
+| `flash_args` | esptool 参数原始来源 |
+| `README.md` | 功能清单与烧录命令 |
+
+### 11.4 与 3.49-V2 固件的功能差异
+
+`main/` 里的控制通道、播报闭环、`notify` / `abort_notify` / 回执逻辑是**公共代码**，
+4B 固件里都在，`query_status` 同样能查到 `notify_active` / `notify_id`。
+
+2026-10-26 傍晚已把 3.49-V2 的板级定制**移植到 4B**（编译通过、ELF 符号确认，
+**尚未在 4B 实机上验证**）：
+
+| 功能 | 3.49-V2 | 4B | 4B 实现方式 |
+|---|---|---|---|
+| BOOT 键播报中停止播报 | ✅ | ✅ | `application.cc` 公共逻辑 |
+| 屏幕双击停止播报 / 清预览图 | ✅ | ✅ | 4B 专属 `CustomLcdDisplay`（继承 `RgbLcdDisplay`，只叠加手势，复用 RGB 刷屏管线） |
+| 三击切换主题 | ✅ | ✅ | 同上 |
+| 晃动（IMU）进入聆听 | ✅ | ✅ | `ImuMonitor` 直拷（QMI8658 同型号，接音频 I2C 总线 47/48） |
+| 双击/三击的震动抑制 | ✅ | ✅ | BOOT 键、屏幕点击、侧键按下均打 `NotifyUserInteraction()` 时间戳 |
+| RTC 自动校时 | ✅ | ✅ | `RtcMonitor` 直拷（PCF85063 同型号）；时区偏移补进了 4B 的 `config.h` |
+| 公司 logo 开机画面 | ✅ | ✅ | 重生成 360×91 资源（源图取自 3.49 版内嵌 PNG，裁掉留白后缩放） |
+
+**移植时的三个关键决定**（改动记录在 `esp32-s3-touch-lcd-4b.cc`）：
+
+1. **不照搬 3.49 的手写 flush**：3.49-V2 的 `CustomLcdDisplay` 自带 DMA 分块刷屏回调，
+   那是 QSPI 屏的方案；4B 的 RGB 并口走 `lvgl_port_add_disp_rgb`（双缓冲 + bounce buffer），
+   硬套会破坏刷新机制。因此 4B 的 `CustomLcdDisplay` 继承 `RgbLcdDisplay`，只重写
+   `SetupUI` / `SetEmotion` / `SetTheme`。
+2. **logo 资源重新生成**而非直接复用：3.49 版 logo 画布 640×172 超出 480 屏宽；
+   用 `scripts/gen_company_logo.py` 从旧 `company_logo.c` 提取原图（640×172）、
+   裁掉透明留白（525×132）、缩放到 360×91、量化 96 色，light/dark 两版共约 7 KB。
+   源 PNG 存放在板级 `assets/` 目录，可随时重生成。
+3. **IMU/RTC 驱动零改动直拷**：4B 与 3.49-V2 的 QMI8658 / PCF85063 同型号、
+   同样挂在音频 I2C 总线（GPIO47/48），`imu_monitor.h` / `rtc_monitor.h` 原样复制；
+   仅 `RTC_TIMEZONE_OFFSET_SEC` 需要补进 4B 的 `config.h`。
+
+`set_imu` 控制、NVS `imu/enabled` 持久化、`HasImu()` / `IsImuEnabled()` 等
+Board 接口也一并补齐，行为与 3.49-V2 完全一致。
+
+**待真机验证项**（手上有 4B 后逐项过）：
+
+1. 启动日志确认 `Touch panel initialized successfully`、`QMI8658 initialized`、
+   `RTC ... restored` / `SNTP started`；
+2. 开机/空闲显示 logo，三击切主题后 logo 变白字；
+3. 双击清预览图（`image_cleared`）、播报中双击停播（`user_stopped` / `notify_stopped`）；
+4. 晃动进聆听、点击后 700ms 内晃动不触发。
+

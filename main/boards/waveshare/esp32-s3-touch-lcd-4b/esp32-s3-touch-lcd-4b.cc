@@ -28,6 +28,10 @@
 #include <esp_lcd_panel_io_additions.h>
 #include <esp_ota_ops.h>
 
+#include "custom_lcd_display.h"
+#include "imu_monitor.h"
+#include "rtc_monitor.h"
+
 #define TAG "WaveshareEsp32s3TouchLCD4b"
 
 class Pmic : public Axp2101 {
@@ -114,6 +118,10 @@ private:
     uint32_t key_press_start;
     bool key_pressed;
     bool key_handled;
+
+    ImuMonitor imu_monitor_;
+    bool imu_available_ = false;
+    RtcMonitor rtc_monitor_;
 
     void InitializePowerSaveTimer() {
         power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
@@ -233,14 +241,18 @@ private:
         ESP_ERROR_CHECK(esp_lcd_new_panel_st7701(panel_io, &panel_config, &panel_handle));
         esp_lcd_panel_init(panel_handle);
 
-        display_ = new RgbLcdDisplay(panel_io, panel_handle,
+        display_ = new CustomLcdDisplay(panel_io, panel_handle,
                                   DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X,
                                   DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
+            // Pressing the button shakes the board too; keep the IMU from reading it
+            // as a posture change (see ImuMonitor::NotifyUserInteraction).
+            ImuMonitor::NotifyUserInteraction();
             auto& app = Application::GetInstance();
+            app.ReportUserEvent("button_click", "boot");
             if (app.GetDeviceState() == kDeviceStateStarting) {
                 EnterWifiConfigMode();
                 return;
@@ -323,8 +335,11 @@ private:
 
         if (current_level != last_level) {
             last_level = current_level;
-            
+
             if (current_level > 0) {
+                // Pressing the side key also shakes the board; stamp it so the IMU
+                // does not treat the shake as a posture change.
+                ImuMonitor::NotifyUserInteraction();
                 press_start_time_ms = esp_timer_get_time() / 1000;
                 ESP_LOGD(TAG, "Button pressed, start time recorded");
             } else {
@@ -375,6 +390,26 @@ private:
         );
     }
 
+    void InitializeImu() {
+        // QMI8658 接在音频 I2C 总线上（GPIO 47/48），地址 0x6B，与 3.49-V2 同型号。
+        // 可通过控制通道的 set_imu 命令或 NVS (imu/enabled) 关闭，避免调试时误触发。
+        Settings settings("imu", false);
+        bool enabled = settings.GetBool("enabled", true);
+        imu_available_ = imu_monitor_.Initialize(i2c_bus_, enabled);
+        if (!imu_available_) {
+            ESP_LOGW(TAG, "IMU not initialized, gesture trigger disabled");
+        } else if (!enabled) {
+            ESP_LOGI(TAG, "IMU motion detection disabled by NVS");
+        }
+    }
+
+    void InitializeRtc() {
+        // PCF85063 同样接在音频 I2C 总线上（GPIO 47/48），地址 0x51，与 3.49-V2 同型号。
+        if (!rtc_monitor_.Initialize(i2c_bus_)) {
+            ESP_LOGW(TAG, "RTC not initialized, time will not persist offline");
+        }
+    }
+
 public:
     WaveshareEsp32s3TouchLCD4b() : boot_button_(BOOT_BUTTON_GPIO) {
         InitializePowerSaveTimer();
@@ -386,6 +421,8 @@ public:
         InitializeButtons();
         InitializeTools();
         InitializeKeyMonitor();  // 启动按键监听
+        InitializeImu();
+        InitializeRtc();
         GetBacklight()->SetBrightness(100);
     }
 
@@ -435,6 +472,20 @@ public:
         }
         WifiBoard::SetPowerSaveLevel(level);
     }
+
+    bool HasImu() override { return imu_available_; }
+
+    bool SetImuEnabled(bool enabled) override {
+        if (!imu_available_) {
+            return false;
+        }
+        imu_monitor_.SetEnabled(enabled);
+        Settings settings("imu", true);
+        settings.SetBool("enabled", enabled);
+        return true;
+    }
+
+    bool IsImuEnabled() override { return imu_available_ && imu_monitor_.IsEnabled(); }
 };
 
 DECLARE_BOARD(WaveshareEsp32s3TouchLCD4b);

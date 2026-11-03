@@ -1,0 +1,76 @@
+﻿文件,类别,本地新增行,上游2.5.2新增行,合并冲突,处置建议,优先级
+.github/workflows/build.yml,上游也改（需三路合并）,7,47,YES,采用上游新版 CI 选择逻辑；本 fork 未使用 GitHub CI，不投入维护,低
+.gitignore,本地独有改动（上游未动）,2,0,no,直接保留 .workbuddy/ 忽略项,低
+CMakeLists.txt,上游也改（需三路合并）,3,1,YES,PROJECT_VER 改为 2.5.2.1，保留 fork 修订号策略,高
+README.md,上游也改（需三路合并）,1,4,no,以上游为准（39 语言已由 mr-IN 语系提供）,低
+main/CMakeLists.txt,上游也改（需三路合并）,13,130,no,保留 4 处：notify_player.cc / control_mqtt.cc 源文件项、wk-esp32s3-dev 与 esp32-c6-epaper-1.54 板级分支、mr-IN 语言分支,高
+main/Kconfig.projbuild,上游也改（需三路合并）,79,92,YES,保留 CONTROL_MQTT_* 三项 + WK 板选项组 + LCD_NV3030B + ESP_VIDEO 占位符；同时接收上游 CHD/maza-ai 等新板选项,高
+main/application.cc,上游也改（需三路合并）,266,210,YES,手工三路合并，5 处冲突。重点保护：notify 扩展、控制通道挂钩、阶段跳过版本检查、删除自动 OTA 升级,最高
+main/application.h,上游也改（需三路合并）,40,8,YES,合并：StartNotification 声明按上游位置归位，保留 fork 全部新增声明,高
+main/audio/audio_service.cc,上游也改（需三路合并）,39,185,YES,AudioTask 已改为值语义 + FixedQueue，需把 playback_id/media_position_ms 重新挂到新结构上；4 处冲突,高
+main/audio/audio_service.h,上游也改（需三路合并）,5,63,no,保留 on_playback_progress 回调与 AudioTask 新字段、ReleaseWakeWordResources()；MAX_DECODE 值上游已同步为 1200，无需再改,中
+main/boards/bread-compact-wifi/compact_wifi_board.cc,本地独有改动（上游未动）,2,0,no,直接保留（OledDisplay 增加 swap_xy 实参）,低
+main/boards/bread-compact-wifi/config.h,本地独有改动（上游未动）,1,0,no,直接保留 DISPLAY_SWAP_XY,低
+main/boards/common/backlight.cc,本地独有改动（上游未动）,21,0,no,直接保留 ReapplyBrightness 背光守护实现,高
+main/boards/common/backlight.h,本地独有改动（上游未动）,7,0,no,直接保留 ReapplyBrightness 虚函数,高
+main/boards/common/board.h,本地独有改动（上游未动）,11,0,no,直接保留 GetIpAddress/GetWifiSsid/GetWifiRssi 与 IMU 三个虚接口,高
+main/boards/common/dual_network_board.cc,本地独有改动（上游未动）,6,0,no,直接保留网络信息转发,低
+main/boards/common/dual_network_board.h,本地独有改动（上游未动）,3,0,no,直接保留三个 override 声明,低
+main/boards/common/esp_video.cc,上游也改（需三路合并）,4,131,YES,上游重写 131 行；RGB565X 支持 2.5.2 已自带，只需确认 Capture 失败日志保留,高
+main/boards/common/ethernet_board.h,本地独有改动（上游未动）,1,0,no,直接保留 GetIpAddress,低
+main/boards/common/wifi_board.cc,上游也改（需三路合并）,8,2,no,保留三处网络信息实现 + kDeviceStateNotifying 纳入复位条件,中
+main/boards/common/wifi_board.h,本地独有改动（上游未动）,3,0,no,直接保留三个 override 声明,低
+main/boards/m5stack/atoms3r-echo-pyramid/atoms3r_echo_pyramid.cc,上游也改（需三路合并）,1,4,no,直接保留 kDeviceStateNotifying 灯色分支,低
+main/boards/otto-robot/otto_robot.cc,上游也改（需三路合并）,55,91,YES,上游重构了摄像头检测流程，需把本地 DetectHardwareVersion/DetectCamera 拆分重放到新版,中
+main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/config.h,本地独有改动（上游未动）,11,0,no,上游未改，直接保留（旋转 90、电池 ADC、RTC 时区）,高
+main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/config.json,本地独有改动（上游未动）,9,0,no,上游未改，直接保留（你好小威唤醒词 sdkconfig）,高
+main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/custom_lcd_display.cc,本地独有改动（上游未动）,340,0,no,上游未改，直接保留（flush 守护、手势、公司 logo、主题切换）,最高
+main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/custom_lcd_display.h,本地独有改动（上游未动）,37,0,no,上游未改，直接保留,高
+main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/waveshare-s3-touch-lcd-3.49-v2.cc,本地独有改动（上游未动）,158,0,no,上游未改，直接保留（显示使能守护、IMU/RTC/电池、BOOT 8s 长按）,最高
+main/boards/waveshare/esp32-s3-touch-lcd-4b/config.h,本地独有改动（上游未动）,4,0,no,上游未改，直接保留 RTC 时区定义,中
+main/boards/waveshare/esp32-s3-touch-lcd-4b/config.json,本地独有改动（上游未动）,9,0,no,上游未改，直接保留唤醒词配置,高
+main/boards/waveshare/esp32-s3-touch-lcd-4b/esp32-s3-touch-lcd-4b.cc,本地独有改动（上游未动）,53,0,no,上游未改，直接保留（改用 CustomLcdDisplay、IMU/RTC）,高
+main/device_state.h,上游也改（需三路合并）,21,1,no,直接保留 kDeviceStateNotifying 与 DeviceStateToString()（上游只改了一行）,高
+main/display/display.cc,上游也改（需三路合并）,2,3,no,保留 SetStatusColor 空实现,低
+main/display/display.h,上游也改（需三路合并）,2,50,no,上游新增 50 行基类接口，合并时保留 SetStatusColor 虚函数,中
+main/display/lcd_display.cc,上游也改（需三路合并）,239,32,no,本地新增 239 行（预览视口滚动、壁纸 cover 缩放、PNG 解码、状态色），上游仅 +32 行，冲突面小但需逐段核对,最高
+main/display/lcd_display.h,上游也改（需三路合并）,8,1,no,保留 preview_viewport_ 与 4 个新虚函数声明,高
+main/display/lvgl_display/lvgl_display.cc,上游也改（需三路合并）,49,21,no,保留状态色复位、时钟分钟节流、电量百分比、壁纸空实现,高
+main/display/lvgl_display/lvgl_display.h,上游也改（需三路合并）,14,5,YES,冲突：上游给 SetPreviewImage 补了 override，本地新增 5 个虚函数，二者并存即可,高
+main/display/lvgl_display/lvgl_theme.cc,上游也改（需三路合并）,3,3,YES,取上游注释（本地改动与上游同义，仅措辞不同）,低
+main/display/oled_display.cc,上游也改（需三路合并）,102,11,no,保留 128x32 竖屏布局与滚动速度修正（上游仅 +11 行）,中
+main/display/oled_display.h,上游也改（需三路合并）,6,6,YES,保留 swap_xy 形参（带默认值，兼容上游调用方）,中
+main/idf_component.yml,上游也改（需三路合并）,2,51,YES,版本号整体采用上游（ml307 3.7.5 / wifi-connect 3.3.1 / IDF>=6.0.1），尾部保留 cube32esp/xpowerslib,最高
+main/ota.cc,上游也改（需三路合并）,31,105,YES,采用上游 std::expected 版 ParseVersion（本地硬化已被上游等价实现覆盖），删除本地 charconv 版本,高
+main/protocols/mqtt_protocol.cc,上游也改（需三路合并）,24,56,YES,采用上游：shared_ptr<Udp> + 锁外 Send 的重构与本地意图完全一致，本地改动已被上游吸收,中
+main/protocols/mqtt_protocol.h,上游也改（需三路合并）,1,5,YES,采用上游（含同样的设计注释）,低
+main/protocols/protocol.h,上游也改（需三路合并）,2,3,no,保留 playback_id / media_position_ms 字段,高
+main/protocols/websocket_protocol.cc,上游也改（需三路合并）,5,9,no,保留 transport 字段类型校验,中
+main/settings.cc,本地独有改动（上游未动）,6,0,no,保留 nvs_handle_ == 0 空句柄保护,中
+scripts/build.py,上游也改（需三路合并）,64,206,no,冲突面最大（上游 +206/-51），保留三项：IDF_PATH 直调 idf.py、wake_word_supported 判定、=n 校验放宽,高
+scripts/tests/test_build.py,上游也改（需三路合并）,99,296,no,以上游为基线，补回本地 2 个用例（wake word PSRAM 依赖、=n 隐藏符号）,中
+sdkconfig.defaults,上游也改（需三路合并）,1,2,no,保留 NANO_FORMAT 与 LV_CALENDAR_HEADER_* 三行删除（上游已同步部分，注意 picolibc 下符号不可见）,中
+main/control_mqtt.cc,新增文件：fork 新增 1290 行：第二路控制 MQTT 主体,—,—,—,整文件保留,最高
+main/control_mqtt.h,新增文件：fork 新增 142 行：控制通道接口,—,—,—,整文件保留,最高
+main/notify/notify_player.cc,新增文件：源自 2.5.2 但按旧 Http API 改写（284 行）,—,—,—,整文件保留,最高
+main/notify/notify_player.h,新增文件：源自 2.5.2（63 行）,—,—,—,整文件保留,高
+main/cjson_utils.h,新增文件：与 2.5.2 一致（27 行）,—,—,—,整文件保留,低
+main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/imu_monitor.h,新增文件：fork 新增 QMI8658 姿态检测（193 行）,—,—,—,整文件保留,高
+main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/rtc_monitor.h,新增文件：fork 新增 PCF85063 RTC（219 行）,—,—,—,整文件保留,高
+main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/company_logo.c,新增文件：fork 新增 logo 位图（632 行）,—,—,—,整文件保留,中
+main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/company_logo.h,新增文件：fork 新增 logo 声明,—,—,—,整文件保留,中
+main/boards/waveshare/esp32-s3-touch-lcd-4b/custom_lcd_display.cc,新增文件：fork 新增：4B 手势/logo 子类（298 行）,—,—,—,整文件保留,高
+main/boards/waveshare/esp32-s3-touch-lcd-4b/custom_lcd_display.h,新增文件：fork 新增（56 行）,—,—,—,整文件保留,高
+main/boards/waveshare/esp32-s3-touch-lcd-4b/imu_monitor.h,新增文件：fork 新增（193 行，与 3.49V2 同源）,—,—,—,整文件保留,高
+main/boards/waveshare/esp32-s3-touch-lcd-4b/rtc_monitor.h,新增文件：fork 新增（219 行，与 3.49V2 同源）,—,—,—,整文件保留,高
+main/boards/waveshare/esp32-s3-touch-lcd-4b/company_logo.c,新增文件：fork 新增 logo 位图（472 行）,—,—,—,整文件保留,中
+main/boards/waveshare/esp32-s3-touch-lcd-4b/company_logo.h,新增文件：fork 新增 logo 声明,—,—,—,整文件保留,中
+main/boards/waveshare/esp32-s3-touch-lcd-4b/assets/virsical_logo_light.png,新增文件：fork 新增壁纸/logo 资源,—,—,—,整文件保留,低
+main/boards/waveshare/esp32-s3-touch-lcd-4b/assets/virsical_logo_dark.png,新增文件：fork 新增壁纸/logo 资源,—,—,—,整文件保留,低
+main/boards/wk-esp32s3-dev/*,新增文件：与 2.5.2 完全一致（整板已随上游带入）,—,—,—,整文件保留,—
+main/boards/waveshare/esp32-c6-epaper-1.54/*,新增文件：与 2.5.2 完全一致,—,—,—,整文件保留,—
+main/boards/common/xpower.h,新增文件：与 2.5.2 完全一致,—,—,—,整文件保留,—
+main/assets/locales/mr-IN/*,新增文件：与 2.5.2 完全一致,—,—,—,整文件保留,—
+scripts/control_mqtt_monitor.py,新增文件：fork 新增控制通道调试脚本（344 行）,—,—,—,整文件保留,低
+scripts/notify_probe.py,新增文件：fork 新增播报探测脚本（222 行）,—,—,—,整文件保留,低
+scripts/gen_company_logo.py,新增文件：fork 新增 logo 生成脚本（112 行）,—,—,—,整文件保留,低

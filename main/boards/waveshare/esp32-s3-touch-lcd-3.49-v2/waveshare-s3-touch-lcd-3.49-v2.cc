@@ -85,6 +85,70 @@ private:
         ESP_ERROR_CHECK(ret);
     }
 
+    // V2 相对原版的关键接线变化（见本目录 README）：
+    //   EXIO1 = 背光使能（高有效），EXIO5 = LCD 复位（高有效），背光 PWM 从 GPIO8 挪到 GPIO42。
+    // 问题：TCA9554 一旦 POR（I2C 干扰、电源瞬时跌落、ESD），输出会回到高阻态，背光使能
+    // 随之丢失；而固件只在开机流程里写过一次，运行期没有任何恢复路径。结果就是
+    // 「背光灭、屏全黑，但主控/音频/网络全部正常」，只能按 RST 重启才能恢复——
+    // 因为重启会把 EXIO1 重新写回 1。下面这个低优先级任务负责把这两路使能锁回高电平。
+    static constexpr uint32_t DISPLAY_ENABLE_MASK =
+        IO_EXPANDER_PIN_NUM_1 | IO_EXPANDER_PIN_NUM_5;
+
+    void DisplayEnableGuard() {
+        bool read_failed_logged = false;
+        bool first_read_done = false;
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+
+            // 背光 PWM 也只有开机/改亮度时写一次；外设被复位后占空比会丢，
+            // 而 brightness_ 软件状态仍是「正确」的，SetBrightness() 会因值未变化
+            // 直接返回，永远修不回来。这里周期性回读比对，不一致才重写并上报。
+            if (auto* backlight = GetBacklight()) {
+                backlight->ReapplyBrightness();
+            }
+
+            if (io_expander == nullptr) {
+                continue;
+            }
+            uint32_t levels = 0;
+            if (esp_io_expander_get_level(io_expander, DISPLAY_ENABLE_MASK, &levels) != ESP_OK) {
+                if (!read_failed_logged) {
+                    ESP_LOGW(TAG, "Cannot read TCA9554, display enable guard inactive");
+                    read_failed_logged = true;
+                }
+                continue;
+            }
+            read_failed_logged = false;
+            if (!first_read_done) {
+                // 首次成功回读即证明守护链路可用（任务在跑 + get_level 被驱动支持）
+                ESP_LOGI(TAG, "Display enable guard running, EXIO1/5 levels=0x%02x",
+                         (unsigned)(levels & DISPLAY_ENABLE_MASK));
+                first_read_done = true;
+            }
+            uint32_t lost = DISPLAY_ENABLE_MASK & ~levels;
+            if (lost == 0) {
+                continue;
+            }
+            ESP_LOGW(TAG, "Display enable lost: read=0x%02x lost=0x%02x, restoring",
+                     (unsigned)levels, (unsigned)lost);
+            // TCA9554 掉电后方向寄存器同样会回到输入态，只写输出寄存器不会驱动引脚，
+            // 所以先恢复方向再恢复电平，两者都要做。
+            esp_io_expander_set_dir(io_expander, DISPLAY_ENABLE_MASK, IO_EXPANDER_OUTPUT);
+            esp_io_expander_set_level(io_expander, DISPLAY_ENABLE_MASK, 1);
+        }
+    }
+
+    static void DisplayEnableGuardTrampoline(void* arg) {
+        static_cast<CustomBoard*>(arg)->DisplayEnableGuard();
+    }
+
+    void InitializeDisplayEnableGuard() {
+        if (xTaskCreate(DisplayEnableGuardTrampoline, "disp_en_guard", 3072, this, 2, nullptr) !=
+            pdPASS) {
+            ESP_LOGW(TAG, "Failed to create display enable guard task");
+        }
+    }
+
     void InitializeSpi() {
         ESP_LOGI(TAG, "Initialize QSPI bus");
         spi_bus_config_t buscfg = {};
@@ -178,6 +242,9 @@ private:
         pwr_button_.OnLongPress([this]() {
             if(is_PwrControlEn) {
                 is_PwrControlEn = false;
+                // 注意：EXIO6 拉低后全工程没有任何路径把它写回 1，只有重启能恢复。
+                // 若这块板 EXIO6 关联供电，长按 PWR 会不可逆地掉电/灭屏。
+                ESP_LOGW(TAG, "PWR long-press: EXIO6 -> 0 (no restore path until reboot)");
                 esp_io_expander_set_level(io_expander, IO_EXPANDER_PIN_NUM_6, 0);
             }
         });
@@ -284,6 +351,7 @@ public:
         InitializeBatteryMonitor();
         InitializeImu();
         InitializeRtc();
+        InitializeDisplayEnableGuard();
         GetBacklight()->RestoreBrightness();
     }
 

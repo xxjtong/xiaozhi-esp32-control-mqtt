@@ -394,7 +394,7 @@ cmd: notify{audio_url, subtitles?, id?} → 仅 Idle 受理 → 进入 Notifying
 | [docs/control-mqtt.md](docs/control-mqtt.md) | ★ 第二路 MQTT 控制通道完整协议（命令/事件/图片规格/阶段记录） |
 | [docs/control-mqtt-notify-feedback.md](docs/control-mqtt-notify-feedback.md) | ★ 播报闭环反馈实施方案 + 10 项真机测试记录与复查结论 |
 | [docs/tts-broadcast-design.md](docs/tts-broadcast-design.md) | 远程语音播报服务设计评估（服务端 TTS + 直链下发） |
-| [docs/flashing.md](docs/flashing.md) | 3.49 V2 烧录实操（偏移表/命令/注意事项/厂家文档） |
+| [docs/flashing.md](docs/flashing.md) | 烧录实操（偏移表/命令/注意事项/厂家文档）；§11 为 4B（480×480）板型专章 |
 | [docs/virsical-desktop-ai-badge-architecture.md](docs/virsical-desktop-ai-badge-architecture.md) | ★ 威思客桌面 AI 助理 / 电子工牌方案评估与系统架构（含汇报 PPT/PDF） |
 | [docs/virsical-release-2.4.2.1-2026-10-26.md](docs/virsical-release-2.4.2.1-2026-10-26.md) | ★ 2.4.2.1 版本策略、2026-10-26 需求与真机测试记录 |
 | [docs/websocket.md](docs/websocket.md) / [docs/mqtt-udp.md](docs/mqtt-udp.md) | 主协议两种传输 |
@@ -414,11 +414,11 @@ cmd: notify{audio_url, subtitles?, id?} → 仅 Idle 受理 → 进入 Notifying
 - `interaction` 事件以"进入 Speaking"计数，服务端拆分 TTS 时可能多计；
 - 聆听→待机由服务端 goodbye 驱动，设备无本地静音超时兜底；
 - host 测试存在 1 项失败：板级 `config.json` 的 `CONFIG_SR_WN_...=n` 触发上游「唤醒词不得写在板级配置」断言，跑 unittest/CI 会红，本地 `build.py` 不受影响；
-- IMU 运动检测灵敏度偏高（0.1g 阈值），静态放置偶发误触发；屏幕点击与按键按下会打时间戳、其后 700ms 忽略运动（抑制点击机身抖动），但仍无法区分"用户拿起来晃动"和"桌面被碰了一下"；调试时可用 `{"type":"set_imu","enable":false}` 关闭（持久化到 NVS `imu/enabled`）；
+- IMU 运动检测阈值 **0.25g**（2026-10-26 由 0.1g 上调：0.1g 在 4G 量程下仅占 4% 满量程，实测"拿起板子插 USB"就会误唤醒）；屏幕点击与按键按下会打时间戳、其后 700ms 忽略运动（抑制点击机身抖动），但仍无法区分"用户主动晃动"和"桌面被碰了一下"；调试时可用 `{"type":"set_imu","enable":false}` 关闭（持久化到 NVS `imu/enabled`）；
 - `notify` 的音频 URL 必须是不跳转的直链，`http://` 与 `https://` 均可；跨网段/高 RTT 链路出现过首包超时（5s 超时），生产环境音频应放同网段或公网 CDN；
 - 控制通道事件为 QoS 0，设备离线期间的事件不补发；
 - `PROJECT_VER` 为 **`2.4.2.1`**（上游基础版本 `2.4.2` + fork 修订号 `.1`，数字后缀保证 OTA 版本解析兼容）；2026-10-25 只合入上游 v2.5.2 的部分局部修复（阶段十四），不是完整升级，MCP 错误码/`max_length`、C++ 异常关闭、`NetworkResult`、epd 公共类等未合入；
-- 4B 板级目录已有，但 fork 的 480×480 工牌 UI、手势、IMU/RTC UI 尚未对齐（一期不做电量 UI）；当前构建/验证仍以 3.49 为主；4B 的 `config.json` 已同步“你好，小威”唤醒词配置，尚未做 4B 全量构建/真机验证。
+- 4B 板级目录已有，2026-10-26 已产出固件并完成板级定制移植（`dist/esp32-s3-touch-lcd-4b/`，`0x2efb20`，余 25%；手势/logo/IMU/RTC 已接，详见 [docs/flashing.md](docs/flashing.md) §11），**但未做 4B 真机验证**；当前真机验证基线仍是 3.49 V2。
 - 小智云支持私有化部署，当前方案仍按 SaaS 试点；私有化/与企业服务端合并属于二期/三期，需评估 GPU、运维、许可和数据合规。
 
 ---
@@ -475,3 +475,41 @@ cmd: notify{audio_url, subtitles?, id?} → 仅 Idle 受理 → 进入 Notifying
 **真机验证**：10 项用例全部通过（正常播报 / 远程取消 / 空闲取消 / 唤醒打断 / 双击停播报 / IMU 触发聆听 /
 喇叭不误触发 / 双击清图 / 点击抖动抑制 / 失败场景）。固件 `xiaozhi.bin` = `0x2f0040`，分区余 25%。
 唤醒词为「**你好，小威**」（非「你好小智」），首次测唤醒打断失败就是因为说错了唤醒词。
+
+---
+
+## 15. 2026-10-26（下午）：4B（480×480）固件首次构建
+
+按厂家文档 <https://docs.waveshare.net/ESP32-S3-Touch-LCD-4b> 为 4 寸 480×480 板型出固件。
+
+**结论**
+
+| 项 | 结果 |
+|---|---|
+| 板型配置 | `CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_4B=y`，唤醒词「你好，小威」，`CONFIG_USE_DEVICE_AEC=y`，`CONFIG_USE_AFE_WAKE_WORD=n` |
+| 分区 | `partitions/v2/16m.csv`：app `0x20000` / 0x3f0000，assets `0x800000`（与 3.49 V2 一致） |
+| 产物 | `xiaozhi.bin` = `0x2eb3b0`（2.92 MB），**余 26%**；已整理到 `dist/esp32-s3-touch-lcd-4b/` |
+| 状态 | **仅编译通过，未刷机验证**（手上设备是 3.49 V2，两版固件不通用） |
+
+**构建过程中遇到的两个环境问题**
+
+1. `idf.py build` 的 `os.mkdir(build/log)` 报 `PermissionError(EEXIST)` → 先 `mv build/log /tmp/...`，或直接 `cd build && ninja all`。
+2. 切换板型后 `dependencies.lock` 重新解析，15 个组件版本上调（如 `espressif/button` 4.2.1→4.2.2），组件管理器要原地删除旧目录被安全删除策略拦截 → 把这些目录 `mv` 到 `/tmp` 备份，重新配置时自动重新拉取，无需放行批量删除。
+
+**4B 尚未移植的板级能力**：屏幕双击停播/清图、三击换主题、公司 logo、IMU 晃动进聆听、点击震动抑制、RTC 校时。
+`main/` 里的控制通道与播报闭环是公共代码，4B 固件里全部可用（含 BOOT 键停止播报 + `user_stopped` 回执）。
+逐项对照见 [docs/flashing.md](docs/flashing.md) §11.4。
+
+### 15.1 补充（同日傍晚）：4B 板级定制移植
+
+按用户选择继续把 3.49-V2 的板级定制移植到 4B，全部编译进 `0x2efb20` 版固件（ELF 符号已核对）：
+
+| 项 | 做法 |
+|---|---|
+| `CustomLcdDisplay`（双击停播/清图、三击换主题） | 4B 专属子类，**继承 `RgbLcdDisplay`** 只重写 `SetupUI`/`SetEmotion`/`SetTheme`；不搬 3.49 的 QSPI 手写 flush，避免破坏 RGB 双缓冲 + bounce buffer 刷屏 |
+| 公司 logo | 新增 `scripts/gen_company_logo.py`：从 3.49 版 `company_logo.c` 内嵌 PNG 提取原图（640×172）→ 裁掉透明留白（525×132）→ 缩放 360×91 → 量化 96 色调色板 PNG，light/dark 共约 7 KB；源图存 `boards/waveshare/esp32-s3-touch-lcd-4b/assets/` |
+| `ImuMonitor` / `RtcMonitor` | 驱动零改动直拷（QMI8658/PCF85063 与 3.49-V2 同型号、同在音频 I2C 总线 47/48）；4B `config.h` 补 `RTC_TIMEZONE_OFFSET_SEC` |
+| 按键震动抑制 | BOOT 键、屏幕点击、侧键（TCA9554 P4）按下均打 `NotifyUserInteraction()` 时间戳 |
+| Board 接口 | 补 `HasImu()` / `SetImuEnabled()` / `IsImuEnabled()`，`set_imu` 控制与 NVS 持久化与 3.49-V2 一致 |
+
+状态：**编译通过、未真机验证**。验证清单见 [docs/flashing.md](docs/flashing.md) §11.4 末尾。

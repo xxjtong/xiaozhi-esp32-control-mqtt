@@ -2,6 +2,9 @@
 
 本文档记录本项目相对上游 `xiaozhi-esp32` 的全部定制内容：新增的第二路 MQTT 控制通道、为实现它所做的核心代码改动、构建配置修复，以及历次修改与验证记录。
 
+> **给对接方的接口清单**（上行 6 类消息、下行 15 条指令、错误码、示例报文）见
+> [`control-mqtt-api.md`](./control-mqtt-api.md)。本文是设计与实现记录。
+
 ## 1. 背景与目标
 
 设备原有的 MQTT 通道用于 xiaozhi.me 官方协议（会话、UDP 音频、MCP），不应被外部系统直接驱动。本项目新增一条**独立的控制平面**，用于远程控制设备：
@@ -541,7 +544,8 @@ Smallest app partition is 0x3f0000 bytes. 0xfffc0 bytes (25%) free.
 - `set_image` 的图片会常驻屏幕，直到被新图替换、`{"clear":true}` 清除，或设备重新渲染 UI；`EmoteDisplay` / `OttoEmojiDisplay` 未覆写 `CancelPreviewTimeout()`，仍沿用各自行为
 - `set_image` 的 `mode=background` 支持 JPEG/PNG；PNG 需要额外的 ARGB8888 解码缓冲，1MP 级 PNG 可能因 PSRAM 不足回 `success=false`，壁纸建议控制在 512px 左右
 - `set_image` 有硬性上限：文件 ≤4MB、分辨率 ≤1280×1280 且 ≤100 万像素；超限直接回 `success=false`，无法通过配置调整
-- IMU 运动检测阈值固定 0.1g，静止放置偶发误触发；屏幕点击与按键按下会打时间戳、其后 700ms 忽略运动（抑制点击抖动），但拿放桌面等场景仍可能误触发；可用 `set_imu` 关闭，重启后仍保持 NVS 中的开关状态
+- IMU 运动检测阈值 0.25g（2026-10-26 由 0.1g 上调，见下条），屏幕点击与按键按下会打时间戳、其后 700ms 忽略运动（抑制点击抖动）；可用 `set_imu` 关闭，重启后仍保持 NVS 中的开关状态
+- 0.1g 阈值时代的实测问题：4G 量程下 0.1g 仅占 4% 满量程，挪动设备（如拿起板子插 USB）、碰桌面、有人走动震桌面都会触发唤醒；2026-10-26 起 `MOTION_THRESHOLD` 提到 **0.25g**，仍可覆盖"拿起设备/明显晃动"（通常 ≥0.5g），过滤掉桌面轻微扰动
 - `notify` 的 `audio_url` 必须是不跳转的直链；跨网段/高 RTT 链路出现过首包超时（`kHttpTimeoutMs = 5000`），生产环境音频应放同网段或公网 CDN
 - `notify` 回复在播放真正开始前就返回成功（**只表示已接受并开始播放**）；播放是否成功以 `notify_result` 为准
 - `notify_result` 为 QoS 0 尽力而为，离线期间不补发；服务端需自行做超时兜底

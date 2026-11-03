@@ -20,3 +20,5 @@ mmap_generate_*.h
 .clangd
 # AI assistant session memory (not part of the firmware source)
 .workbuddy/
+build_4b/
+/backup/

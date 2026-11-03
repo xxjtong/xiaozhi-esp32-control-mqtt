@@ -91,7 +91,10 @@ private:
     int64_t last_trigger_us_ = 0;    // 上次触发时间
     std::atomic<bool> enabled_{true};
     static constexpr int64_t COOLDOWN_US = 5 * 1000 * 1000;  // 5 秒冷却
-    static constexpr float MOTION_THRESHOLD = 0.1f;  // 幅值变化阈值（g），极轻微动作即触发
+    static constexpr float MOTION_THRESHOLD = 0.25f;  // 幅值变化阈值（g）
+    // 2026-10-26 由 0.1f 提到 0.25f：0.1g 在 4G 量程下只占 4% 满量程，挪动设备、碰桌子、
+    // 有人走动震桌面都会触发（实测"插 USB 时拿起板子"就唤醒过一次）。0.25g 仍能覆盖
+    // "拿起设备/明显晃动"（通常 0.5g 以上），但过滤掉桌面轻微扰动。
     // How long a tap keeps masking motion detection. Refreshed on every tap, so a
     // double/triple click stays masked for the whole gesture plus this tail.
     static constexpr int64_t TAP_SUPPRESS_US = 700 * 1000;

@@ -12,6 +12,7 @@
 #include "settings.h"
 
 #include "esp_lcd_panel_io.h"
+#include <esp_timer.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -29,6 +30,40 @@
 
 static SemaphoreHandle_t trans_done_sem = NULL;
 static uint16_t *trans_buf_1;
+
+// 单个 QSPI 分段（22 KB @40 MHz）正常不到 10 ms 完成，500 ms 已是非常宽松的余量。
+// 不能再用 portMAX_DELAY：一旦某次 tx_color() 失败，on_color_trans_done 不会再触发，
+// LVGL 任务会永久阻塞并一直持有 lvgl_mux，主任务随后卡在 UpdateStatusBar() 的
+// DisplayLockGuard(30000) 上，连 10 s 一次的 SystemInfo 心跳都打不出来——
+// 表现就是「黑屏、串口静默、但还能说话」，只能按 RESET 恢复。
+static constexpr TickType_t FLUSH_TRANS_DONE_TIMEOUT = pdMS_TO_TICKS(500);
+// 判定显示链路已锁死所需的持续失败窗口 / 最小失败次数。
+static constexpr int64_t FLUSH_RECOVER_WINDOW_US = 20 * 1000 * 1000;
+static constexpr uint32_t FLUSH_RECOVER_MIN_FAILURES = 5;
+
+static int64_t last_flush_success_us = 0;
+static uint32_t flush_failure_count = 0;
+
+// 本次 flush 失败处理。这里运行在 LVGL 任务里，任何影响运行时状态的操作
+// 都必须经由 Application::Schedule() 派发到主任务。
+static void ReportFlushFailure(const char* reason, int chunk) {
+    ++flush_failure_count;
+    if (flush_failure_count == 1 || (flush_failure_count % 10) == 0) {
+        ESP_LOGE(TAG, "Flush failure #%u: %s (chunk %d)", flush_failure_count, reason, chunk);
+    }
+    // 长时间持续失败且始终没成功过 → 显示链路已锁死，重启自恢复，
+    // 否则只能靠人工按 RESET。
+    if (flush_failure_count >= FLUSH_RECOVER_MIN_FAILURES &&
+        (esp_timer_get_time() - last_flush_success_us) > FLUSH_RECOVER_WINDOW_US) {
+        ESP_LOGE(TAG, "Display flush stuck for >%d s, rebooting to recover",
+                 (int)(FLUSH_RECOVER_WINDOW_US / 1000000));
+        flush_failure_count = 0;
+        last_flush_success_us = esp_timer_get_time();
+        Application::GetInstance().Schedule([]() {
+            Application::GetInstance().Reboot();
+        });
+    }
+}
 
 #if (DISPLAY_ROTATION_90 == true)
 static uint16_t *dest_map;
@@ -85,17 +120,37 @@ void CustomLcdDisplay::lvgl_port_flush_callback(lv_display_t *drv, const lv_area
 #else
     uint16_t *map = (uint16_t*)color_map;
 #endif
-    xSemaphoreGive(trans_done_sem);
+    // 清掉可能残留的信号量计数：上一帧若超时，迟到的 trans-done 回调会把计数
+    // 留在 1，不清掉的话后续等待会立刻返回，形同虚设。
+    while (xSemaphoreTake(trans_done_sem, 0) == pdTRUE) {
+    }
 
-    for(int i = 0; i<flush_coun; i++) {
-        xSemaphoreTake(trans_done_sem,portMAX_DELAY);
-        memcpy(trans_buf_1,map,LVGL_DMA_BUFF_LEN);
-        esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2, offsety2, trans_buf_1);
+    bool flush_ok = true;
+    for (int i = 0; i < flush_coun; i++) {
+        memcpy(trans_buf_1, map, LVGL_DMA_BUFF_LEN);
+        esp_err_t err = esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1,
+                                                  offsetx2, offsety2, trans_buf_1);
+        if (err != ESP_OK) {
+            ReportFlushFailure("esp_lcd_panel_draw_bitmap failed", i);
+            flush_ok = false;
+            break;
+        }
+        if (xSemaphoreTake(trans_done_sem, FLUSH_TRANS_DONE_TIMEOUT) != pdTRUE) {
+            ReportFlushFailure("trans-done not received", i);
+            flush_ok = false;
+            break;
+        }
         offsety1 += offgap;
         offsety2 += offgap;
         map += dmalen;
     }
-    xSemaphoreTake(trans_done_sem,portMAX_DELAY);
+
+    if (flush_ok) {
+        flush_failure_count = 0;
+        last_flush_success_us = esp_timer_get_time();
+    }
+    // 失败也必须调用 lv_disp_flush_ready()：否则 LVGL 认为本次刷新尚未结束，
+    // 后续所有刷新都会被永远挡住，屏幕彻底不再更新。
     lv_disp_flush_ready(drv);
 }
 
@@ -114,6 +169,7 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
     port_cfg.timer_period_ms = 50;
     lvgl_port_init(&port_cfg);
     trans_done_sem = xSemaphoreCreateBinary();
+    last_flush_success_us = esp_timer_get_time();
     trans_buf_1 = (uint16_t *)heap_caps_malloc(LVGL_DMA_BUFF_LEN, MALLOC_CAP_DMA);
 
     uint32_t buffer_size = 0;
