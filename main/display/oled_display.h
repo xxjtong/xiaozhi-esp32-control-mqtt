@@ -40,6 +40,7 @@ public:
     virtual void SetTheme(Theme* theme) override;
     // Upstream 2.5.0: turn the OLED panel off in power save mode.
     void SetPowerSaveMode(bool on) override;
+    bool IsMonochrome() const override { return true; }
 };
 
 #endif  // OLED_DISPLAY_H
