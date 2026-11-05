@@ -296,7 +296,9 @@ MipiLcdDisplay::MipiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
         .io_handle = panel_io,
         .panel_handle = panel,
         .control_handle = nullptr,
-        .buffer_size = static_cast<uint32_t>(width_ * 50),
+        // 50 行 = 48KB 内部 RAM，而语音会话（Opus + 网络缓冲）需要约 20KB。
+        // 降到 30 行（约 29KB）腾出 19KB；仍按整行刷新，不影响画面正确性。
+        .buffer_size = static_cast<uint32_t>(width_ * 30),
         .double_buffer = false,
         .hres = static_cast<uint32_t>(width_),
         .vres = static_cast<uint32_t>(height_),

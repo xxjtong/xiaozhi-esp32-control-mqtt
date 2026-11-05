@@ -145,14 +145,14 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
     // FEED 环形缓冲填满刷屏、audio_afe 忙循环吃满 CPU1、任务看门狗每 10 秒触发，
     // 并因 PSRAM 带宽被抢导致 RGB 屏周期性闪烁。回到 2.4.2.1 验证过的组合。
     afe_config_t* afe_config =
-        afe_config_init(input_format.c_str(), models_, AFE_TYPE_VC, AFE_MODE_HIGH_PERF);
+        afe_config_init(input_format.c_str(), models_, AFE_TYPE_VC, AFE_MODE_LOW_COST);
     if (afe_config == nullptr) {
         ESP_LOGE(TAG, "Failed to create AFE configuration");
         return false;
     }
 
     afe_config->aec_init = codec_->input_reference();
-    afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
+    afe_config->aec_mode = AEC_MODE_VOIP_LOW_COST;
     afe_config->aec_nlp_level = AEC_NLP_LEVEL_VERYAGGR;
     afe_config->ns_init = false;
     afe_config->vad_init = kUseAfeForVoiceProcessing;
