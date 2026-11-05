@@ -11,6 +11,9 @@
 #include "power_save_timer.h"
 #include "axp2101.h"
 #include "i2c_device.h"
+#include "settings.h"
+
+#include <esp_system.h>
 
 #include <esp_log.h>
 #include <esp_lcd_panel_vendor.h>
@@ -124,7 +127,10 @@ private:
     RtcMonitor rtc_monitor_;
 
     void InitializePowerSaveTimer() {
-        power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
+        // 60 秒进入省电（背光降到 70）；第三个参数 -1 = 永不自动关机。
+        // 原值 300 会在空闲 5 分钟后 pmic_->PowerOff() 直接断电，用户只能按电源键
+        // 重新上电，现场容易被当成死机。桌面设备保留变暗省电即可。
+        power_save_timer_ = new PowerSaveTimer(-1, 60, -1);
         power_save_timer_->OnEnterSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(true);
             GetBacklight()->SetBrightness(70); });
@@ -204,7 +210,11 @@ private:
             .in_color_format = LCD_COLOR_FMT_RGB565,
             .out_color_format = LCD_COLOR_FMT_RGB565,
             .num_fbs = 2,
-            .bounce_buffer_size_px = 480 * 20,
+            // 静态画面实测约 8 秒闪一次，判断是 RGB DMA 与帧缓冲写入的时序竞争。
+            // bounce buffer 越大，一帧内的重同步次数越少（20→40 行，24 段降为 12 段），
+            // 丢同步的概率随之下降。IDF 6.1 的 RGB 配置没有 avoid_tearing 字段，
+            // 这是可用的最小改动手段。
+            .bounce_buffer_size_px = 480 * 40,
             .dma_burst_size = 64,
             .hsync_gpio_num = BSP_LCD_HSYNC,
             .vsync_gpio_num = BSP_LCD_VSYNC,
@@ -258,6 +268,30 @@ private:
                 return;
             }
             app.ToggleChatState();
+        });
+
+        // 长按 3 秒：只清除协议配置（保留 WiFi 与设备 UUID），重启后重新走激活流程，
+        // 屏幕会显示 6 位配对码。用于在小智控制台解绑后重新绑定设备。
+        // 注意不要清整片 NVS：那会连 WiFi 与 UUID 一起丢失，服务器上会变成新设备。
+        boot_button_.OnLongPress([this]() {
+            auto& app = Application::GetInstance();
+            // 允许在待机、刚启动、以及"激活卡住"时重来；对话中不打断。
+            auto state = app.GetDeviceState();
+            if (state != kDeviceStateIdle && state != kDeviceStateUnknown &&
+                state != kDeviceStateStarting && state != kDeviceStateActivating) {
+                ESP_LOGW(TAG, "Long press ignored in state %s", DeviceStateToString(state));
+                return;
+            }
+            ESP_LOGW(TAG, "Long press: clearing protocol config for re-activation");
+            GetDisplay()->ShowNotification("已清除配置，重启后显示配对码", 2000);
+            {
+                Settings mqtt_settings("mqtt", true);
+                mqtt_settings.EraseAll();
+                Settings ws_settings("websocket", true);
+                ws_settings.EraseAll();
+            }
+            vTaskDelay(pdMS_TO_TICKS(1800));
+            esp_restart();
         });
 
 #if CONFIG_USE_DEVICE_AEC
@@ -411,7 +445,8 @@ private:
     }
 
 public:
-    WaveshareEsp32s3TouchLCD4b() : boot_button_(BOOT_BUTTON_GPIO) {
+    // 第 3 个参数是长按阈值：3 秒用于"重新激活"，避免误触。
+    WaveshareEsp32s3TouchLCD4b() : boot_button_(BOOT_BUTTON_GPIO, false, 3000, 0) {
         InitializePowerSaveTimer();
         InitializeCodecI2c();
         InitializeTca9554();
