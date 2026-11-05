@@ -124,6 +124,8 @@ private:
 
     ImuMonitor imu_monitor_;
     bool imu_available_ = false;
+    // 无电池时的下次探测时间（避免每秒刷 I2C 告警）
+    int64_t battery_probe_after_us_ = 0;
     RtcMonitor rtc_monitor_;
 
     void InitializePowerSaveTimer() {
@@ -489,6 +491,17 @@ public:
 
     virtual bool GetBatteryLevel(int &level, bool &charging, bool &discharging) override {
         static bool last_discharging = false;
+
+        // 板上未接电池时，AXP2101 的电量计没有电池供电，0x01（充放电方向）与
+        // 0xA4（电量）都读不回来，容错层会返回 0。若直接把 0 当电量上报，界面会显示
+        // 0% 并可能触发低电提示。这里做两件事：
+        //   1) 既不在充电也不在放电 → 判定为无电池，不上报电量；
+        //   2) 无电池期间 30 秒才探测一次，避免每秒刷 I2C 告警。
+        int64_t now = esp_timer_get_time();
+        if (now < battery_probe_after_us_) {
+            return false;
+        }
+
         charging = pmic_->IsCharging();
         discharging = pmic_->IsDischarging();
         if (discharging != last_discharging)
@@ -498,6 +511,11 @@ public:
         }
 
         level = pmic_->GetBatteryLevel();
+        if (level == 0 && !charging && !discharging) {
+            battery_probe_after_us_ = now + 30 * 1000 * 1000;
+            return false;
+        }
+        battery_probe_after_us_ = 0;
         return true;
     }
 
