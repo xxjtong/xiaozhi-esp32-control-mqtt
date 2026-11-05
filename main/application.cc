@@ -453,14 +453,24 @@ void Application::CheckNewVersion() {
     int retry_count = 0;
     int retry_delay = 10;  // Initial retry delay in seconds
 
-    // 如果 MQTT/WebSocket 配置已在 NVS 里（设备已激活过），
-    // 直接跳过版本检查和激活流程，加速启动。
+    // 如果 MQTT/WebSocket 配置已在 NVS 里（设备已激活过），直接跳过版本检查，
+    // 加速启动、并避免在云端不可达的网络上卡住开机。
+    //
+    // 需要"解绑后重新绑定"时，不要在这里加联网检查：实测开机阶段的时间/网络都还没
+    // 稳定，TLS 会因系统时钟停留在 1970 年而握手失败，DNS 也可能瞬时失败，一旦请求
+    // 挂起会把启动流程堵死。改用 BOOT 长按 3 秒清除协议配置后重启（见板级代码），
+    // 下次开机没有协议配置 → 走完整激活流程 → 屏幕显示配对码。
     {
         Settings mqtt_settings("mqtt", false);
         Settings ws_settings("websocket", false);
         bool has_mqtt = !mqtt_settings.GetString("endpoint").empty();
         bool has_ws = !ws_settings.GetString("url").empty();
         if (has_mqtt || has_ws) {
+            // This fast path skips CheckVersion(), which is where the running image is
+            // normally marked valid. With rollback enabled an OTA-installed image stays
+            // in ESP_OTA_IMG_PENDING_VERIFY until that happens, so the bootloader would
+            // roll it back on the next reset. Confirm the image before returning.
+            ota_->MarkCurrentVersionValid();
             ESP_LOGI(TAG, "Skipping version check: protocol config already exists in NVS");
             has_server_time_ = false;
             return;
@@ -759,8 +769,18 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
          digit_sound{'6', Lang::Sounds::OGG_6}, digit_sound{'7', Lang::Sounds::OGG_7},
          digit_sound{'8', Lang::Sounds::OGG_8}, digit_sound{'9', Lang::Sounds::OGG_9}}};
 
+    // 配对码要放在状态栏：聊天区只显示服务端下发提示语的尾部，把数字拼进消息里
+    // 会被挤出可见区域（实测只看到提示语、看不到码）。状态栏是固定可见的单行。
     // This sentence uses 9KB of SRAM, so we need to wait for it to finish
     Alert(Lang::Strings::ACTIVATION, message.c_str(), "link", Lang::Sounds::OGG_ACTIVATION);
+
+    if (!code.empty()) {
+        // 状态栏只放 6 位数字：带上"激活设备"之类前缀会让这一行超宽折行，
+        // 把上方的提示语顶出可视区（实测文字只剩 2/3）。网址由聊天区显示。
+        Board::GetInstance().GetDisplay()->SetStatus(code.c_str());
+        // 同时打到串口：现场排障时不必盯着屏幕，客服也能远程确认客户看到的码。
+        ESP_LOGW(TAG, "Activation code: %s", code.c_str());
+    }
 
     for (const auto& digit : code) {
         auto it = std::find_if(digit_sounds.begin(), digit_sounds.end(),
