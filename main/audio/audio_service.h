@@ -178,6 +178,12 @@ private:
     TaskHandle_t audio_input_task_handle_ = nullptr;
     TaskHandle_t audio_output_task_handle_ = nullptr;
     TaskHandle_t opus_codec_task_handle_ = nullptr;
+    // audio_input / opus_codec 的栈放在 PSRAM（见 AudioService::Start）：AEC 高配
+    // 模式需要把内部 SRAM 让给 AFE，否则语音会话会 ENOMEM。
+    StackType_t* audio_input_task_stack_ = nullptr;
+    StaticTask_t* audio_input_task_buffer_ = nullptr;
+    StackType_t* opus_codec_task_stack_ = nullptr;
+    StaticTask_t* opus_codec_task_buffer_ = nullptr;
     std::mutex audio_queue_mutex_;
     std::condition_variable audio_queue_cv_;
     // Testing records up to AUDIO_TESTING_MAX_DURATION_MS, then swaps into the

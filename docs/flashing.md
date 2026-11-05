@@ -379,11 +379,13 @@ xiaozhi.bin binary size 0x2efb20 bytes. Smallest app partition is 0x3f0000 bytes
 |---|---|---|---|
 | BOOT 键播报中停止播报 | ✅ | ✅ | `application.cc` 公共逻辑 |
 | 屏幕双击停止播报 / 清预览图 | ✅ | ✅ | 4B 专属 `CustomLcdDisplay`（继承 `RgbLcdDisplay`，只叠加手势，复用 RGB 刷屏管线） |
+| 空闲双击进入聆听 | — | ✅ | `CustomLcdDisplay` 在 Idle 下双击走 `StartListening(GetDefaultListeningMode())`，与 BOOT/唤醒词同路径 |
 | 三击切换主题 | ✅ | ✅ | 同上 |
+| 唤醒词“你好，邵怡” | — | ✅（2026-11-05） | `config.json` 的 `CONFIG_CUSTOM_WAKE_WORD="ni hao shao yi"`；命令写入 `assets/index.json`，**换唤醒词必须同时烧 app 与 `generated_assets.bin`（0x800000）**，只烧 app 会继续用旧词 |
 | 晃动（IMU）进入聆听 | ✅ | ✅ | `ImuMonitor` 直拷（QMI8658 同型号，接音频 I2C 总线 47/48） |
 | 双击/三击的震动抑制 | ✅ | ✅ | BOOT 键、屏幕点击、侧键按下均打 `NotifyUserInteraction()` 时间戳 |
 | RTC 自动校时 | ✅ | ✅ | `RtcMonitor` 直拷（PCF85063 同型号）；时区偏移补进了 4B 的 `config.h` |
-| 公司 logo 开机画面 | ✅ | ✅ | 重生成 360×91 资源（源图取自 3.49 版内嵌 PNG，裁掉留白后缩放） |
+| 公司 logo 开机画面 | ✅ | ✅ | 重生成 480×121 资源（2026-11-03 按 480 屏宽更新，此前为 360×91；源图取自 3.49 版内嵌 PNG，裁掉留白后缩放） |
 
 **移植时的三个关键决定**（改动记录在 `esp32-s3-touch-lcd-4b.cc`）：
 
@@ -393,7 +395,8 @@ xiaozhi.bin binary size 0x2efb20 bytes. Smallest app partition is 0x3f0000 bytes
    `SetupUI` / `SetEmotion` / `SetTheme`。
 2. **logo 资源重新生成**而非直接复用：3.49 版 logo 画布 640×172 超出 480 屏宽；
    用 `scripts/gen_company_logo.py` 从旧 `company_logo.c` 提取原图（640×172）、
-   裁掉透明留白（525×132）、缩放到 360×91、量化 96 色，light/dark 两版共约 7 KB。
+   裁掉透明留白（525×132）、缩放到 **480×121**（2026-11-03 由 360×91 更新，铺满 480
+   屏宽）、沿用原图 64 色调色板，light/dark 两版共约 10.7 KB。
    源 PNG 存放在板级 `assets/` 目录，可随时重生成。
 3. **IMU/RTC 驱动零改动直拷**：4B 与 3.49-V2 的 QMI8658 / PCF85063 同型号、
    同样挂在音频 I2C 总线（GPIO47/48），`imu_monitor.h` / `rtc_monitor.h` 原样复制；

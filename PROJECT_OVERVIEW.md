@@ -136,7 +136,7 @@ xiaozhi-esp32-main/
 
 - `AudioService`：统一调度采集、播放、唤醒词、VAD、Opus 编解码。
 - 链路：麦克风 → AFE（AEC/NS/VAD）→ 16k PCM → Opus（60ms VBR + DTX）→ 主协议上传；下行 TTS 音流反向播放。
-- 唤醒词：WakeNet 内置模型或自定义唤醒词；本 fork 使用 **“你好，小威”**（见 5.1）。
+- 唤醒词：WakeNet 内置模型或自定义唤醒词；4B 产品使用 **“你好，邵怡”**（`ni hao shao yi`），3.49 测试板仍为“你好，小威”（见 5.1）。
 - 关键约束：**不得阻塞音频任务、不得在音频路径反复大块分配内存**。
 
 ### 4.3 协议层（[main/protocols/](main/protocols/)）
@@ -178,10 +178,10 @@ xiaozhi-esp32-main/
 | 电源 | USB-C 5V 固定外接；板上 AXP2101 + 锂电接口保留，一期不做电池/电量 UI |
 | IMU / RTC | QMI8658 / PCF85063（与 3.49 同型号） |
 | 存储 | ESP32-S3R8，16MB Flash，8MB PSRAM |
-| 唤醒词 | **“你好，小威”**（`ni hao xiao wei`，自定义 WakeNet/MultiNet 配置） |
+| 唤醒词 | **“你好，邵怡”**（`ni hao shao yi`，自定义 MultiNet 配置；命令在 `assets/index.json`，换词必须同时烧 app 与 `generated_assets.bin`） |
 | 代码 | [main/boards/waveshare/esp32-s3-touch-lcd-4b/](main/boards/waveshare/esp32-s3-touch-lcd-4b/) |
 
-> 4B 板级目录已存在，但当前使用通用 `LcdDisplay`；fork 的 480×480 工牌 UI、双击/三击手势、公司 logo、IMU/RTC 监控仍需对齐（一期不做电量 UI）。控制通道、设备 MCP、音频链路与板级无关，可先在 3.49 上验证。
+> 4B 已使用 `CustomLcdDisplay`（双击/三击手势、公司 logo、IMU/RTC、无电池判定已接）；控制通道、设备 MCP、音频链路与板级无关。2026-11-05 真机验证：空闲态双击进聆听、三击换主题、IMU 晃动进聆听、说“你好，邵怡”唤醒均通过。完整根因、修复组合、烧录坑与验证记录见 [docs/2026-11-05-4b-idle-activation-fix.md](docs/2026-11-05-4b-idle-activation-fix.md)。
 
 **当前测试：Waveshare ESP32-S3-Touch-LCD-3.49 V2**
 
@@ -193,7 +193,7 @@ xiaozhi-esp32-main/
 | IMU | 运动检测在 **Idle / Notifying** 下触发聆听（`StartListening()` + 设备默认模式）并上报 `motion_detected`；播报中先停播报再进聆听。5 秒冷却；屏幕点击与 BOOT/PWR 按键会打时间戳，其后 700ms 忽略运动（避免点击抖动误触发）。可用 `set_imu` 关闭 |
 | 电池 | ADC1_CH3 (GPIO4)，200kΩ/100kΩ 3:1 分压采样 |
 | 触摸 | 空闲时：双击清预览图（`image_cleared`），三击切主题（`theme_changed`）；**播报中双击 = 停止播报**（`notify_stopped`），不清图也不切主题 |
-| 唤醒词 | **“你好，小威”**（当前测试板配置；4B 已同步同一组配置） |
+| 唤醒词 | **“你好，小威”**（3.49 测试板配置；4B 产品已改为“你好，邵怡”） |
 
 代码：[main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/](main/boards/waveshare/esp32-s3-touch-lcd-3.49-v2/)（含 `custom_lcd_display.cc`、`imu_monitor.h`）。
 
@@ -507,7 +507,7 @@ cmd: notify{audio_url, subtitles?, id?} → 仅 Idle 受理 → 进入 Notifying
 | 项 | 做法 |
 |---|---|
 | `CustomLcdDisplay`（双击停播/清图、三击换主题） | 4B 专属子类，**继承 `RgbLcdDisplay`** 只重写 `SetupUI`/`SetEmotion`/`SetTheme`；不搬 3.49 的 QSPI 手写 flush，避免破坏 RGB 双缓冲 + bounce buffer 刷屏 |
-| 公司 logo | 新增 `scripts/gen_company_logo.py`：从 3.49 版 `company_logo.c` 内嵌 PNG 提取原图（640×172）→ 裁掉透明留白（525×132）→ 缩放 360×91 → 量化 96 色调色板 PNG，light/dark 共约 7 KB；源图存 `boards/waveshare/esp32-s3-touch-lcd-4b/assets/` |
+| 公司 logo | 新增 `scripts/gen_company_logo.py`：从 3.49 版 `company_logo.c` 内嵌 PNG 提取原图（640×172）→ 裁掉透明留白（525×132）→ 缩放 **480×121**（2026-11-03 由 360×91 更新，铺满 480 屏宽）→ 沿用原图 64 色调色板 PNG，light/dark 共约 10.7 KB；源图存 `boards/waveshare/esp32-s3-touch-lcd-4b/assets/` |
 | `ImuMonitor` / `RtcMonitor` | 驱动零改动直拷（QMI8658/PCF85063 与 3.49-V2 同型号、同在音频 I2C 总线 47/48）；4B `config.h` 补 `RTC_TIMEZONE_OFFSET_SEC` |
 | 按键震动抑制 | BOOT 键、屏幕点击、侧键（TCA9554 P4）按下均打 `NotifyUserInteraction()` 时间戳 |
 | Board 接口 | 补 `HasImu()` / `SetImuEnabled()` / `IsImuEnabled()`，`set_imu` 控制与 NVS 持久化与 3.49-V2 一致 |

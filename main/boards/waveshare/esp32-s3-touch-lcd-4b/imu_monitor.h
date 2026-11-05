@@ -87,14 +87,18 @@ private:
     static inline std::atomic<bool> tap_settle_pending_{false};
 
     // 状态机：检测运动 → 触发 StartListening
-    float last_mag_ = 1.0f;          // 上次加速度幅值（g），静态约 1g
+    // 用三轴矢量差而不是 |a| 差值：只比较幅值时，把设备从平放拿起来/立起来
+    // 这类"姿态变化"几乎不改变重力模长（始终约 1g），delta≈0，永远不触发。
+    // 三轴矢量差同时覆盖旋转与平移，才是真正的"姿态/运动变化"。
+    float last_x_ = 0.0f;
+    float last_y_ = 0.0f;
+    float last_z_ = 0.0f;
+    bool have_baseline_ = false;
     int64_t last_trigger_us_ = 0;    // 上次触发时间
     std::atomic<bool> enabled_{true};
     static constexpr int64_t COOLDOWN_US = 5 * 1000 * 1000;  // 5 秒冷却
-    static constexpr float MOTION_THRESHOLD = 0.25f;  // 幅值变化阈值（g）
-    // 2026-10-26 由 0.1f 提到 0.25f：0.1g 在 4G 量程下只占 4% 满量程，挪动设备、碰桌子、
-    // 有人走动震桌面都会触发（实测"插 USB 时拿起板子"就唤醒过一次）。0.25g 仍能覆盖
-    // "拿起设备/明显晃动"（通常 0.5g 以上），但过滤掉桌面轻微扰动。
+    // 三轴矢量差阈值（g）。桌面轻微振动约 0.05g；拿起/翻转设备通常 >0.5g。
+    static constexpr float MOTION_THRESHOLD = 0.20f;
     // How long a tap keeps masking motion detection. Refreshed on every tap, so a
     // double/triple click stays masked for the whole gesture plus this tail.
     static constexpr int64_t TAP_SUPPRESS_US = 700 * 1000;
@@ -133,14 +137,27 @@ private:
     void ImuTask() {
         vTaskDelay(pdMS_TO_TICKS(500));  // 等待系统启动
         while (true) {
-            vTaskDelay(pdMS_TO_TICKS(200));  // 5Hz 采样
+            vTaskDelay(pdMS_TO_TICKS(100));  // 10Hz 采样，提高"拿起/翻转"的捕获率
 
             float x, y, z;
             if (!ReadAccel(x, y, z)) continue;
 
-            float mag = sqrtf(x * x + y * y + z * z);
-            float delta = fabsf(mag - last_mag_);
-            last_mag_ = mag;
+            if (!have_baseline_) {
+                last_x_ = x;
+                last_y_ = y;
+                last_z_ = z;
+                have_baseline_ = true;
+                continue;
+            }
+
+            // 三轴矢量差：旋转（重力方向变化）和平移都能被捕获。
+            const float dx = x - last_x_;
+            const float dy = y - last_y_;
+            const float dz = z - last_z_;
+            const float delta = sqrtf(dx * dx + dy * dy + dz * dz);
+            last_x_ = x;
+            last_y_ = y;
+            last_z_ = z;
 
             // Keep the baseline fresh while disabled, but never trigger. This makes
             // runtime enable/disable through set_imu safe without a spurious event.
@@ -151,7 +168,7 @@ private:
             if (now - last_trigger_us_ < COOLDOWN_US) continue;
 
             // 点击屏幕/按键造成的机身抖动不算姿态变化，窗口内忽略。
-            // 放在 last_mag_ 更新之后，抑制期间基线仍然跟随，解除后不会补触发。
+            // 基线在上方已经更新，抑制期间仍然跟随，解除后不会补触发。
             int64_t last_tap = last_ui_tap_us_.load(std::memory_order_relaxed);
             if (last_tap != 0) {
                 if (now - last_tap < TAP_SUPPRESS_US) {
@@ -169,10 +186,10 @@ private:
             auto state = app.GetDeviceState();
             if (state != kDeviceStateIdle && state != kDeviceStateNotifying) continue;
 
-            // 加速度幅值变化超过阈值 → 姿态变化
+            // 三轴矢量差超过阈值 → 姿态/运动变化
             if (delta > MOTION_THRESHOLD) {
-                ESP_LOGI(TAG, "Motion detected: mag=%.2fg, delta=%.2fg → StartListening",
-                         mag, delta);
+                ESP_LOGI(TAG, "Motion detected: x=%.2fg y=%.2fg z=%.2fg delta=%.2fg → StartListening",
+                         x, y, z, delta);
                 last_trigger_us_ = now;
                 app.ReportUserEvent("motion_detected");
                 app.Schedule([]() {

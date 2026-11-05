@@ -76,3 +76,11 @@ CONFIG_LV_USE_WIN=n
 
 CONFIG_LV_BUILD_EXAMPLES=n
 CONFIG_LV_BUILD_DEMOS=n
+
+# RGB 面板的帧缓冲在 PSRAM 中，LCD 的 DMA 通过缓存读取它。
+# 默认配置下，任何一次 flash 写入（NVS 提交、资源读取）都会短暂关闭该缓存，
+# 导致面板取不到数据 —— 现象是「空闲时周期性整屏闪一次」。
+# 开启 XIP（指令/只读数据常驻 PSRAM）后，flash 操作不再影响帧缓冲读取。
+# 代价：占用约 2.5MB PSRAM（板载 8MB，帧缓冲约 0.9MB，余量充足）。
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y

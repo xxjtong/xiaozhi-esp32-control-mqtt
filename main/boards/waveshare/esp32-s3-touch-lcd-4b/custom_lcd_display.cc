@@ -59,7 +59,7 @@ void CustomLcdDisplay::OnChildCreatedEvent(lv_event_t* e) {
     }
 }
 
-// 注册点击手势：双击清预览图/停播报、三击切换主题（light <-> dark）
+// 注册点击手势：双击（停播报/清预览图/空闲进聆听）、三击切换主题（light <-> dark）
 void CustomLcdDisplay::SetupUI() {
     // 父类 SetupUI 自带重复调用保护；这里若已初始化过则直接返回，避免把点击
     // 回调和手势定时器再注册一遍（否则一次点击会被处理两次）。
@@ -79,10 +79,10 @@ void CustomLcdDisplay::SetupUI() {
     // 必须重新持有显示锁，避免与 LVGL 任务并发。
     DisplayLockGuard lock(this);
 
-    // emoji_box_ / emoji_image_ 只用于显示。空闲时会把全屏 logo 放进 emoji_image_，
-    // 而 emoji_box_ 是 LV_SIZE_CONTENT，会被撑满整个屏幕；LVGL 里 lv_obj 默认带
-    // LV_OBJ_FLAG_CLICKABLE，这个全屏容器会把点击事件全部吞掉，导致 container_
-    // 收不到点击、清图/切主题失效。这里去掉可点击标志让触摸穿透。
+    // emoji_box_ / emoji_image_ 只用于显示。emoji_box_ 是 LV_SIZE_CONTENT，
+    // 空闲时可能被撑满整个屏幕；LVGL 里 lv_obj 默认带 LV_OBJ_FLAG_CLICKABLE，
+    // 这个容器会把点击事件全部吞掉，导致屏幕根节点收不到点击、手势失效。
+    // 这里去掉可点击标志让触摸穿透。
     lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_CLICKABLE);
@@ -91,29 +91,28 @@ void CustomLcdDisplay::SetupUI() {
     EnableEventBubbling(container_);
     lv_obj_add_event_cb(container_, OnChildCreatedEvent, LV_EVENT_CHILD_CREATED, nullptr);
 
-    lv_obj_add_event_cb(container_, OnScreenClickEvent, LV_EVENT_SHORT_CLICKED, this);
+    // 点击判定只注册一次，挂在屏幕根节点上；冒泡让所有子对象（含兄弟对象
+    // emoji_box_ / status_bar_ / top_bar_ / bottom_bar_ / preview_viewport_）
+    // 的点击都能上浮到这里。注意不能同时还在 container_ / preview_viewport_
+    // 上注册——那样一次点击会被判定两次，三击就变成计数 6。
+    EnableEventBubbling(lv_screen_active());
+    lv_obj_add_event_cb(lv_screen_active(), OnScreenClickEvent, LV_EVENT_SHORT_CLICKED, this);
 
-    // 预览图容器铺满屏幕（为了支持上下拖动），它会吞掉落在图片区域上的点击，
-    // 事件也不会冒泡到 container_，所以这里单独挂一份点击判定。
-    if (preview_viewport_ != nullptr) {
-        lv_obj_add_event_cb(preview_viewport_, OnScreenClickEvent, LV_EVENT_SHORT_CLICKED, this);
-    }
-    // One-shot style timer (paused until the second click) used to distinguish a
-    // double-click from a triple-click: the third click cancels the pending clear.
+    // 双击动作要等确认窗口结束才执行：窗口内来了第三击就改判为三击切主题。
     if (click_timer_ == nullptr) {
         click_timer_ = lv_timer_create(OnClickTimer, CLICK_WINDOW_MS, this);
         if (click_timer_ != nullptr) {
             lv_timer_pause(click_timer_);
         }
     }
-    // 建立底层壁纸：屏幕设为透明，让 bottom_layer 的 logo 透出来
+    // 建立底层壁纸：container_ 背景不透明，logo 挂在 container_ 最底层
     ApplyBottomLayer();
     ShowCompanyLogo();
 
-    ESP_LOGI(TAG, "Double-click clears preview, triple-click switches theme");
+    ESP_LOGI(TAG, "Gestures: double-click=notify stop/preview clear/listen, triple-click=theme");
 }
 
-// 双击清预览图/停播报、三击切换主题（light <-> dark）。
+// 双击清预览图/停播报/进聆听、三击切换主题（light <-> dark）。
 // 注意：不能用 LV_EVENT_DOUBLE_CLICKED / LV_EVENT_TRIPLE_CLICKED —— LVGL 9 把单击/双击/
 // 三击做成「按 3 次循环」下发（见 lv_indev.c indev_proc_short_click：streak 1→SINGLE、
 // 2→DOUBLE、3→TRIPLE、4→SINGLE…），连续点击时只有第 2、5、8 次才是 DOUBLE_CLICKED。
@@ -132,68 +131,107 @@ void CustomLcdDisplay::OnScreenClickEvent(lv_event_t* e) {
             ++self->click_streak_;
         }
     } else {
-        self->click_streak_ = 1;
-        // A new sequence started: cancel any pending double-click clear from the
-        // previous gesture (it may not have fired yet on a busy LVGL task).
-        self->pending_clear_ = false;
-        self->pending_clear_target_ = nullptr;
-        if (self->click_timer_ != nullptr) {
-            lv_timer_pause(self->click_timer_);
+        // 新序列：上一条双击若还没等到确认窗口结束，先补执行再取消，
+        // 避免 LVGL 任务繁忙导致双击动作被第三击吞掉。
+        if (self->pending_action_ != DoubleClickAction::kNone) {
+            self->RunDoubleClickAction();
         }
+        self->CancelPendingDoubleClick();
+        self->click_streak_ = 1;
     }
     self->last_click_tick_ = lv_tick_get();
 
     if (self->click_streak_ == 2) {
-        // While a broadcast is playing the double-click means "stop playing". It must
-        // not also clear the preview image, and the streak is consumed so a third tap
-        // cannot switch the theme right after stopping playback.
-        if (Application::GetInstance().GetDeviceState() == kDeviceStateNotifying) {
-            self->click_streak_ = 0;
-            self->last_click_tick_ = 0;
-            self->pending_clear_ = false;
-            self->pending_clear_target_ = nullptr;
-            if (self->click_timer_ != nullptr) {
-                lv_timer_pause(self->click_timer_);
-            }
-            ESP_LOGI(TAG, "Double-click stops notification playback");
-            // StopNotificationByUser() must run on the main task; report the event
-            // there too so the state it carries matches what really happened (the
-            // audio may have ended between the gesture and this callback).
-            Application::GetInstance().Schedule([]() {
-                auto& app = Application::GetInstance();
-                if (app.GetDeviceState() != kDeviceStateNotifying) {
-                    return;
-                }
-                app.ReportUserEvent("notify_stopped", "double_click");
-                app.StopNotificationByUser();
-            });
-            return;
-        }
-
-        // Wait for the window to expire before clearing: a third click within the
-        // window turns this into a triple-click and must cancel the clear.
-        {
-            DisplayLockGuard lock(self);
-            self->pending_clear_ = self->preview_image_cached_ != nullptr;
-            self->pending_clear_target_ = self->preview_image_cached_.get();
-        }
-        if (self->pending_clear_ && self->click_timer_ != nullptr) {
+        // 第二击只做判定，不立即执行：窗口内若来第三击就改判为三击切主题。
+        self->pending_action_ = self->ResolveDoubleClickAction();
+        if (self->pending_action_ != DoubleClickAction::kNone && self->click_timer_ != nullptr) {
             lv_timer_reset(self->click_timer_);
             lv_timer_resume(self->click_timer_);
-        } else {
-            self->ClearPreviewImage();
         }
     } else if (self->click_streak_ == 3) {
-        // Consume the streak so a fourth click starts a new sequence.
+        // 三击优先：取消待执行的双击动作，只切主题。
+        self->CancelPendingDoubleClick();
         self->click_streak_ = 0;
         self->last_click_tick_ = 0;
-        self->pending_clear_ = false;
-        self->pending_clear_target_ = nullptr;
-        if (self->click_timer_ != nullptr) {
-            lv_timer_pause(self->click_timer_);
-        }
         self->ToggleTheme();
     }
+}
+
+CustomLcdDisplay::DoubleClickAction CustomLcdDisplay::ResolveDoubleClickAction() {
+    auto& app = Application::GetInstance();
+    auto state = app.GetDeviceState();
+
+    // 播报中双击 = 停止播报（优先级最高，不清图也不进聆听）。
+    if (state == kDeviceStateNotifying) {
+        return DoubleClickAction::kStopNotification;
+    }
+
+    // 有常驻预览图时双击 = 清图；记下当前图片，窗口内若换了新图则不动新图。
+    {
+        DisplayLockGuard lock(this);
+        if (preview_image_cached_ != nullptr) {
+            pending_clear_target_ = preview_image_cached_.get();
+            return DoubleClickAction::kClearPreview;
+        }
+        pending_clear_target_ = nullptr;
+    }
+
+    // 空闲时双击 = 进入聆听，与 BOOT 键、唤醒词走同一条状态机路径。
+    if (state == kDeviceStateIdle) {
+        return DoubleClickAction::kStartListening;
+    }
+
+    return DoubleClickAction::kNone;
+}
+
+void CustomLcdDisplay::CancelPendingDoubleClick() {
+    pending_action_ = DoubleClickAction::kNone;
+    pending_clear_target_ = nullptr;
+    if (click_timer_ != nullptr) {
+        lv_timer_pause(click_timer_);
+    }
+}
+
+void CustomLcdDisplay::RunDoubleClickAction() {
+    const DoubleClickAction action = pending_action_;
+    pending_action_ = DoubleClickAction::kNone;
+    if (action == DoubleClickAction::kNone) {
+        pending_clear_target_ = nullptr;
+        return;
+    }
+
+    if (action == DoubleClickAction::kStopNotification) {
+        ESP_LOGI(TAG, "Double-click stops notification playback");
+        // 与状态变更/上报都在主任务执行，保证 event 里的 state 是真实值。
+        Application::GetInstance().Schedule([]() {
+            auto& app = Application::GetInstance();
+            if (app.GetDeviceState() != kDeviceStateNotifying) {
+                return;
+            }
+            app.ReportUserEvent("notify_stopped", "double_click");
+            app.StopNotificationByUser();
+        });
+    } else if (action == DoubleClickAction::kClearPreview) {
+        // 只清双击时看到的那张图，窗口内新下发的图不能误清。
+        DisplayLockGuard lock(this);
+        if (pending_clear_target_ != nullptr &&
+            preview_image_cached_.get() == pending_clear_target_) {
+            ClearPreviewImage();
+        }
+    } else if (action == DoubleClickAction::kStartListening) {
+        ESP_LOGI(TAG, "Double-click: entering listening from idle");
+        // StartListening() 只置事件位，但 GetDefaultListeningMode() 读的是主任务
+        // 字段；统一丢回主任务执行，和 IMU 触发聆听的路径保持一致。
+        Application::GetInstance().Schedule([]() {
+            auto& app = Application::GetInstance();
+            if (app.GetDeviceState() != kDeviceStateIdle) {
+                return;
+            }
+            app.StartListening(app.GetDefaultListeningMode());
+        });
+    }
+
+    pending_clear_target_ = nullptr;
 }
 
 void CustomLcdDisplay::OnClickTimer(lv_timer_t* timer) {
@@ -204,17 +242,7 @@ void CustomLcdDisplay::OnClickTimer(lv_timer_t* timer) {
     lv_timer_pause(timer);
     self->click_streak_ = 0;
     self->last_click_tick_ = 0;
-    // A new image may have arrived inside the double-click window; only clear the
-    // exact image the user double-clicked on.
-    {
-        DisplayLockGuard lock(self);
-        if (self->pending_clear_ &&
-            self->preview_image_cached_.get() == self->pending_clear_target_) {
-            self->ClearPreviewImage();
-        }
-    }
-    self->pending_clear_ = false;
-    self->pending_clear_target_ = nullptr;
+    self->RunDoubleClickAction();
 }
 
 void CustomLcdDisplay::ClearPreviewImage() {

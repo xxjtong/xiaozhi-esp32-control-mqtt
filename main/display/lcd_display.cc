@@ -238,7 +238,20 @@ RgbLcdDisplay::RgbLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     ESP_LOGI(TAG, "Initialize LVGL port");
     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
     port_cfg.task_priority = 1;
-    port_cfg.timer_period_ms = 50;
+    // GT911 的 INT 脚没有接到 GPIO（int_gpio_num = NC），触摸只能靠 LVGL 任务
+    // 轮询。原来 50ms 一次：静止的空闲界面下，一次短于 50ms 的点击可能完全
+    // 不被采样，表现为空闲时双击/三击时灵时不灵；聆听中界面有动画、任务跑得
+    // 更勤，反而正常。降到 10ms（100Hz）保证短按也能被采到。
+    port_cfg.timer_period_ms = 10;
+#if CONFIG_SOC_CPU_CORES_NUM > 1
+    // 4B 的 AEC 高配 DSP 跑在 audio_input（core 0）里，afe_feed 会长时间占满
+    // core 0；MultiNet/AFE（audio_afe）在 core 1 上优先级 3，空闲态也会长时间
+    // 占用。LVGL 默认不绑核且优先级仅 1，触摸定时器会被延迟到十几秒（实测双击
+    // 动作 13s 后才执行）。这里固定到 core 1，并用 esp_lvgl_port 的默认优先级 4：
+    // 触摸/定时器能抢占 audio_afe，audio_afe 在 LVGL 让出后继续跑。
+    port_cfg.task_affinity = 1;
+    port_cfg.task_priority = 4;
+#endif
     lvgl_port_init(&port_cfg);
 
     ESP_LOGI(TAG, "Adding LCD display");

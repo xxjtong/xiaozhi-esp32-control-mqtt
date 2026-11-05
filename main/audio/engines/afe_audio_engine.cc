@@ -141,9 +141,22 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
     char* vad_model_name =
         models_ == nullptr ? nullptr : esp_srmodel_filter(models_, ESP_VADN_PREFIX, nullptr);
     // 上游 2.5.0 起把 AFE 从 VC/HIGH_PERF 改成 FD/LOW_COST。实测在本板
-    // （ES7210 四麦 + 回声参考通道）上，LOW_COST 会让 afe_fetch 持续失败：
-    // FEED 环形缓冲填满刷屏、audio_afe 忙循环吃满 CPU1、任务看门狗每 10 秒触发，
-    // 并因 PSRAM 带宽被抢导致 RGB 屏周期性闪烁。回到 2.4.2.1 验证过的组合。
+    // （ES7210 四麦 + 回声参考通道）上，AEC_MODE_VOIP_LOW_COST 会让 afe_fetch
+    // 持续失败：FEED 环形缓冲填满、audio_afe/audio_input 忙循环吃满双核、
+    // 任务看门狗每 10 秒触发，并因 PSRAM 带宽被抢导致 RGB 屏周期性闪烁。
+    //
+    // 2026-11-05 回归：12:30 的"省 RAM"改动同时把 AFE 和 AEC 改回 LOW_COST。
+    // 空闲态双核被吃满，LVGL（优先级 1）和 IMU（优先级 2）全被饿死 —— 表现为
+    // 空闲时双击/三击/唤醒词/IMU 都失效，按 BOOT 进聆听后才偶尔恢复。
+    //
+    // 组合矩阵（2026-11-05 真机验证）：
+    //   AFE_LOW  + AEC_LOW  : afe_fetch 忙循环，双核吃满，看门狗
+    //   AFE_HIGH + AEC_LOW  : 同样忙循环（17:15 日志）
+    //   AFE_HIGH + AEC_HIGH : 不忙循环，但 AEC DSP 占满 core 0、MultiNet 占满
+    //                         core 1，LVGL 定时器延迟十几秒，空闲手势/唤醒词失效
+    //   AFE_LOW  + AEC_HIGH : ✅ 最终采用。AEC 高配避免 fetch 忙循环，AFE 低配
+    //                         降低整体 DSP 负载，给 MultiNet、LVGL 和 IMU 留出 CPU。
+    // 注意：不要单独把 AEC 改回 LOW_COST；那是忙循环的根因。
     afe_config_t* afe_config =
         afe_config_init(input_format.c_str(), models_, AFE_TYPE_VC, AFE_MODE_LOW_COST);
     if (afe_config == nullptr) {
@@ -152,7 +165,7 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
     }
 
     afe_config->aec_init = codec_->input_reference();
-    afe_config->aec_mode = AEC_MODE_VOIP_LOW_COST;
+    afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
     afe_config->aec_nlp_level = AEC_NLP_LEVEL_VERYAGGR;
     afe_config->ns_init = false;
     afe_config->vad_init = kUseAfeForVoiceProcessing;
