@@ -38,8 +38,10 @@ private:
     void ToggleTheme();
     // 全屏显示公司 logo（按当前主题选择深/浅色版本）
     void ShowCompanyLogo();
-    // 当前是否正在显示 logo（主题切换时用于判断是否需要重绘）
-    bool showing_logo_ = false;
+    // 背景图（公司 logo）挂在 bottom_layer：位于屏幕之下，天然不与任何界面控件
+    // 抢位置，也不受 emoji_box_ 的 LV_SIZE_CONTENT 裁剪影响。
+    void ApplyBottomLayer();
+    lv_obj_t* logo_image_ = nullptr;
     // 上一次短按的 tick（0 表示还没有上一次点击）
     uint32_t last_click_tick_ = 0;
     // 当前连续点击次数：1=单击，2=双击（清图/停播报），3=三击（切主题）

@@ -1022,13 +1022,20 @@ void LcdDisplay::SetupUI() {
 #else
     /* Top layer: Bottom bar - fixed height at bottom */
     bottom_bar_ = lv_obj_create(screen);
-    lv_obj_set_size(bottom_bar_, LV_HOR_RES, text_font->line_height + lvgl_theme->spacing(8));
+    // 高度改成跟随文字自适应：固定按 line_height 算会低估实际字形墨迹高度，
+    // 顶部几个像素被栏裁掉（4B 实测 xiaozhi.me 上沿缺一截，加高 32px 仍差几像素）。
+    // LV_SIZE_CONTENT + 上下小内边距，让栏永远包住标签本身。
+    lv_obj_set_width(bottom_bar_, LV_HOR_RES);
+    lv_obj_set_height(bottom_bar_, LV_SIZE_CONTENT);
     lv_obj_set_style_radius(bottom_bar_, 0, 0);
     lv_obj_set_style_bg_color(bottom_bar_, lvgl_theme->background_color(), 0);
     lv_obj_set_style_text_color(bottom_bar_, lvgl_theme->text_color(), 0);
     lv_obj_set_style_pad_all(bottom_bar_, 0, 0);
     lv_obj_set_style_pad_left(bottom_bar_, lvgl_theme->spacing(4), 0);
     lv_obj_set_style_pad_right(bottom_bar_, lvgl_theme->spacing(4), 0);
+    // pad_all 会清零，必须在它之后设置，否则上下留白失效、字形顶部又被裁。
+    lv_obj_set_style_pad_top(bottom_bar_, lvgl_theme->spacing(3), 0);
+    lv_obj_set_style_pad_bottom(bottom_bar_, lvgl_theme->spacing(3), 0);
     lv_obj_set_style_border_width(bottom_bar_, 0, 0);
     lv_obj_set_scrollbar_mode(bottom_bar_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_align(bottom_bar_, LV_ALIGN_BOTTOM_MID, 0, 0);

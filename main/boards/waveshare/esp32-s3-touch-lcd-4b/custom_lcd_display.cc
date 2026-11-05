@@ -106,6 +106,10 @@ void CustomLcdDisplay::SetupUI() {
             lv_timer_pause(click_timer_);
         }
     }
+    // 建立底层壁纸：屏幕设为透明，让 bottom_layer 的 logo 透出来
+    ApplyBottomLayer();
+    ShowCompanyLogo();
+
     ESP_LOGI(TAG, "Double-click clears preview, triple-click switches theme");
 }
 
@@ -246,14 +250,16 @@ void CustomLcdDisplay::ToggleTheme() {
     Application::GetInstance().ReportUserEvent("theme_changed", next_name);
 }
 
-// 空闲/开机时用公司 logo 顶替默认的机器人图标。
-// 开机阶段默认表情是 "robot_2"，进入空闲后状态机会下发 "neutral"；
-// 但 "neutral" 在 connecting/listening 状态下也会下发，所以只有确实处于
-// 空闲状态时才换成 logo，其余状态保持原有表情逻辑。
+// 背景图与表情现在是"同时存在"的关系：
+//   - logo 挂在 bottom_layer，常驻，任何状态都不动它；
+//   - 表情完全交回基类处理（默认层、默认位置），不再和 logo 抢同一个控件。
+// 只有开机（robot_2）和空闲（idle + neutral）这两种"没有意义表情"的状态才把
+// emoji 容器整个隐藏，让画面只剩 logo。
 void CustomLcdDisplay::SetEmotion(const char* emotion) {
     if (emotion == nullptr) {
-        showing_logo_ = false;
-        RgbLcdDisplay::SetEmotion(emotion);
+        if (emoji_box_ != nullptr) {
+            lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+        }
         return;
     }
 
@@ -261,38 +267,57 @@ void CustomLcdDisplay::SetEmotion(const char* emotion) {
     bool is_idle_neutral = (strcmp(emotion, "neutral") == 0) &&
                            Application::GetInstance().GetDeviceState() == kDeviceStateIdle;
     if (is_boot_logo || is_idle_neutral) {
-        ShowCompanyLogo();
+        if (emoji_box_ != nullptr) {
+            lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+        }
         return;
     }
 
-    showing_logo_ = false;
+    if (emoji_box_ != nullptr) {
+        lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+    }
     RgbLcdDisplay::SetEmotion(emotion);
 }
 
-void CustomLcdDisplay::ShowCompanyLogo() {
-    if (emoji_image_ == nullptr || emoji_label_ == nullptr) {
-        return;
+// 背景图挂在 container_ 里，不用 bottom_layer + 透明屏幕。
+//
+// 原因：屏幕透明会让每次重绘都做一次全屏 alpha 合成，实测把 RGB 刷新余量吃掉，
+// 出现约 8 秒一次的闪屏（同一块屏在 bounce buffer 加到 40 行后才稳定）。
+// 而 container_ 本来就是 LcdDisplay 里的"背景容器"（全屏、创建最早、位于所有 UI 之下），
+// 把 logo 放进去就能得到同样的"壁纸"效果，且整条链路保持不透明、零合成开销。
+void CustomLcdDisplay::ApplyBottomLayer() {
+    auto* theme = static_cast<LvglTheme*>(GetTheme());
+    if (container_ != nullptr) {
+        lv_obj_set_style_bg_color(container_,
+                                  theme != nullptr ? theme->background_color() : lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0);
     }
+    // 屏幕保持不透明，避免引入全屏合成
+    lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
+}
 
+void CustomLcdDisplay::ShowCompanyLogo() {
     DisplayLockGuard lock(this);
-    if (gif_controller_) {
-        gif_controller_->Stop();
-        gif_controller_.reset();
+    if (logo_image_ == nullptr) {
+        if (container_ == nullptr) {
+            return;
+        }
+        // container_ 创建早于 emoji_box_ / top_bar_，因此 logo 天然位于所有控件之下
+        logo_image_ = lv_image_create(container_);
+        lv_obj_remove_flag(logo_image_, LV_OBJ_FLAG_CLICKABLE);
     }
 
     // 深色主题下黑色文字看不见，换用白色文字版本
     auto* theme = static_cast<LvglTheme*>(GetTheme());
     bool dark = (theme != nullptr && theme->name() == "dark");
-    lv_image_set_src(emoji_image_, dark ? &virsical_logo_dark : &virsical_logo_light);
-    lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
-    showing_logo_ = true;
+    lv_image_set_src(logo_image_, dark ? &virsical_logo_dark : &virsical_logo_light);
+    lv_obj_center(logo_image_);
+    lv_obj_remove_flag(logo_image_, LV_OBJ_FLAG_HIDDEN);
 }
 
 void CustomLcdDisplay::SetTheme(Theme* theme) {
     RgbLcdDisplay::SetTheme(theme);
-    // 主题切换后 logo 需要重绘（深/浅色版本不同）
-    if (showing_logo_) {
-        ShowCompanyLogo();
-    }
+    // 主题切换会重设屏幕背景与配色，底层壁纸需要跟着重贴
+    ApplyBottomLayer();
+    ShowCompanyLogo();
 }
