@@ -1,4 +1,5 @@
 #include "control_mqtt.h"
+#include "device_state_str.h"
 
 #include "application.h"
 #include "audio_codec.h"

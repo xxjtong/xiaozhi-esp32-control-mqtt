@@ -1,4 +1,5 @@
 #include "wifi_board.h"
+#include "device_state_str.h"
 #include "display/lcd_display.h"
 #include "esp_lcd_st7701.h"
 

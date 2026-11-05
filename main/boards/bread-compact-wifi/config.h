@@ -51,7 +51,6 @@
 
 #define DISPLAY_MIRROR_X true
 #define DISPLAY_MIRROR_Y true
-#define DISPLAY_SWAP_XY true
 
 
 // A MCP Test: Control a lamp

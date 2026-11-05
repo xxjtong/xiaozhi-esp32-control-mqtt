@@ -1,4 +1,5 @@
 #include "application.h"
+#include "device_state_str.h"
 #include "assets.h"
 #include "assets/lang_config.h"
 #include "audio_codec.h"
