@@ -2,7 +2,9 @@ import copy
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -162,6 +164,17 @@ class WorkflowDiffTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/build.yml").read_text()
         select = workflow.split("name: Select variants based on changes", 1)[1]
         self.script = textwrap.dedent(select.split("        run: |\n", 1)[1].split("\n  build:", 1)[0])
+        # The workflow snippet invokes `python`, which CI images provide. Local
+        # macOS/Homebrew setups often only ship `python3`, so expose a shim instead
+        # of skipping the real workflow text.
+        self.python_shim = None
+        if shutil.which("python") is None:
+            shim = tempfile.TemporaryDirectory(prefix="ci-python-")
+            self.addCleanup(shim.cleanup)
+            shim_path = Path(shim.name) / "python"
+            shim_path.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+            shim_path.chmod(0o755)
+            self.python_shim = shim.name
 
     def git(self, *args):
         return subprocess.check_output(
@@ -178,6 +191,8 @@ class WorkflowDiffTests(unittest.TestCase):
     def selected_paths(self, event="push", before=None, ref="refs/heads/main"):
         output = self.root / "github-output"
         env = dict(os.environ)
+        if self.python_shim is not None:
+            env["PATH"] = self.python_shim + os.pathsep + env.get("PATH", "")
         env.update({
             "EVENT_NAME": event, "BEFORE_SHA": before or self.base,
             "GITHUB_REF": ref, "GITHUB_WORKSPACE": str(self.root),
