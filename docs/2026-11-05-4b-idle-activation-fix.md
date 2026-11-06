@@ -5,6 +5,12 @@
 > 固件版本：`2.5.2.1`；IDF：v6.1
 >
 > 真机串口：`/dev/cu.usbmodem5CF70418411`
+>
+> **2026-11-06 后续**：又修复了 TTS 解码饿死、唤醒阈值/绑核、AEC NLP 档位，以及
+> `SetEmotion`/`SetTheme` 未持 LVGL 锁导致的“连接中卡死 + logo 周期闪烁”。后续记录见
+> [2026-11-06-4b-audio-flicker-lock-fix.md](2026-11-06-4b-audio-flicker-lock-fix.md)。
+> 本文中的 AEC NLP `VERYAGGR`、唤醒阈值 20、`opus_codec` 优先级 2 等描述已被后续
+> 文档取代。
 
 ## 1. 结论
 

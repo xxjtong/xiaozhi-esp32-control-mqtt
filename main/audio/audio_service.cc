@@ -136,6 +136,12 @@ void AudioService::Start() {
     constexpr size_t kAudioOutputStackSize = 2048;
 #endif
     constexpr size_t kOpusCodecStackSize = 2048 * 12;
+#if CONFIG_SOC_CPU_CORES_NUM > 1 && !CONFIG_FREERTOS_UNICORE
+    // AEC 的 afe_feed 固定在 core 0；解码/播放固定到 core 1，避免和 AEC 抢同一个核。
+    constexpr BaseType_t kAudioPlaybackCore = 1;
+#else
+    constexpr BaseType_t kAudioPlaybackCore = 0;
+#endif
 
     audio_input_task_stack_ = static_cast<StackType_t*>(
         heap_caps_malloc(kAudioInputStackSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -162,14 +168,19 @@ void AudioService::Start() {
             "audio_input", kAudioInputStackSize, this, 8, &audio_input_task_handle_, 0);
     }
 
-    /* Start the audio output task */
-    xTaskCreate(
+    // 解码/播放是硬实时：TTS 音频一旦断流，字幕仍会继续显示，用户看到的就是
+    // “声音停了但字幕还在滚”。原来 opus_codec 只有优先级 2、且不绑核，AEC/
+    // MultiNet/LVGL 一忙就被饿死，20 包（约 1.2s）的 decode queue 很快填满并
+    // 静默丢包。这里把两者提到优先级 5（高于 LVGL 4 / audio_afe 3），并固定到
+    // core 1，和 core 0 的 AEC 分开。
+    xTaskCreatePinnedToCore(
         [](void* arg) {
             AudioService* audio_service = (AudioService*)arg;
             audio_service->AudioOutputTask();
             vTaskDelete(NULL);
         },
-        "audio_output", kAudioOutputStackSize, this, 4, &audio_output_task_handle_);
+        "audio_output", kAudioOutputStackSize, this, 5, &audio_output_task_handle_,
+        kAudioPlaybackCore);
 
     /* Start the opus codec task */
     opus_codec_task_stack_ = static_cast<StackType_t*>(
@@ -177,23 +188,24 @@ void AudioService::Start() {
     opus_codec_task_buffer_ = static_cast<StaticTask_t*>(
         heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if (opus_codec_task_stack_ != nullptr && opus_codec_task_buffer_ != nullptr) {
-        opus_codec_task_handle_ = xTaskCreateStatic(
+        opus_codec_task_handle_ = xTaskCreateStaticPinnedToCore(
             [](void* arg) {
                 AudioService* audio_service = (AudioService*)arg;
                 audio_service->OpusCodecTask();
                 vTaskDelete(NULL);
             },
-            "opus_codec", kOpusCodecStackSize, this, 2, opus_codec_task_stack_,
-            opus_codec_task_buffer_);
+            "opus_codec", kOpusCodecStackSize, this, 5, opus_codec_task_stack_,
+            opus_codec_task_buffer_, kAudioPlaybackCore);
     } else {
         ESP_LOGW(TAG, "PSRAM stack for opus_codec unavailable, falling back to internal RAM");
-        xTaskCreate(
+        xTaskCreatePinnedToCore(
             [](void* arg) {
                 AudioService* audio_service = (AudioService*)arg;
                 audio_service->OpusCodecTask();
                 vTaskDelete(NULL);
             },
-            "opus_codec", kOpusCodecStackSize, this, 2, &opus_codec_task_handle_);
+            "opus_codec", kOpusCodecStackSize, this, 5, &opus_codec_task_handle_,
+            kAudioPlaybackCore);
     }
 }
 
@@ -634,24 +646,42 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
 }
 
 bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait) {
-    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-    const uint32_t generation = playback_generation_;
-    if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
-        if (wait) {
-            audio_queue_cv_.wait(lock, [this, generation]() {
-                return service_stopped_.load() || generation != playback_generation_ ||
-                       audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE;
-            });
-        } else {
-            return false;
+    bool dropped = false;
+    {
+        std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+        const uint32_t generation = playback_generation_;
+        if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
+            if (wait) {
+                audio_queue_cv_.wait(lock, [this, generation]() {
+                    return service_stopped_.load() || generation != playback_generation_ ||
+                           audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE;
+                });
+            } else {
+                dropped = true;
+            }
+        }
+        if (!dropped) {
+            if (service_stopped_.load() || generation != playback_generation_) {
+                return false;
+            }
+            playback_drained_notified_ = false;
+            audio_decode_queue_.push_back(std::move(packet));
+            audio_queue_cv_.notify_all();
         }
     }
-    if (service_stopped_.load() || generation != playback_generation_) {
+
+    if (dropped) {
+        // 解码队列满 = opus_codec 没跟上（或解码任务被更高优先级任务压住）。
+        // 音频包被丢弃后字幕仍会继续滚动，必须留下可定位的日志。
+        const uint32_t total = ++debug_statistics_.decode_drop_count;
+        const int64_t now = esp_timer_get_time();
+        if (now - last_decode_drop_log_time_ >= 1000000) {
+            last_decode_drop_log_time_ = now;
+            ESP_LOGW(TAG, "Decode queue is full, dropping audio packet (dropped %lu so far)",
+                     (unsigned long)total);
+        }
         return false;
     }
-    playback_drained_notified_ = false;
-    audio_decode_queue_.push_back(std::move(packet));
-    audio_queue_cv_.notify_all();
     return true;
 }
 

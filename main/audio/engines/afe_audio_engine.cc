@@ -166,7 +166,10 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
 
     afe_config->aec_init = codec_->input_reference();
     afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
-    afe_config->aec_nlp_level = AEC_NLP_LEVEL_VERYAGGR;
+    // NLP 是 AEC 的残留回声抑制级，VERYAGGR 在 4B 上会把 core 0 吃到接近满载
+    // （backtrace 热点在 dios_ssp_aec_res_process），连带 RGB DMA/唤醒词抖动。
+    // 主 AEC 仍保留，只是残留抑制用 NORMAL；若实测回声变明显，回退到 AGGR。
+    afe_config->aec_nlp_level = AEC_NLP_LEVEL_NORMAL;
     afe_config->ns_init = false;
     afe_config->vad_init = kUseAfeForVoiceProcessing;
     afe_config->vad_mode = VAD_MODE_0;
@@ -236,14 +239,21 @@ bool AfeAudioEngine::Initialize(AudioCodec* codec, int frame_duration_ms,
         return false;
     }
 
-    processing_task_ = xTaskCreateStatic(
+#if CONFIG_SOC_CPU_CORES_NUM > 1 && !CONFIG_FREERTOS_UNICORE
+    // AEC 的 afe_feed 在 core 0（audio_input）；把 fetch/MultiNet 固定到 core 1，
+    // 避免它被调度到已经被 AEC 占满的 core 0 上，导致唤醒词实时性变差。
+    constexpr BaseType_t kAfeTaskCore = 1;
+#else
+    constexpr BaseType_t kAfeTaskCore = 0;
+#endif
+    processing_task_ = xTaskCreateStaticPinnedToCore(
         [](void* arg) {
             auto* engine = static_cast<AfeAudioEngine*>(arg);
             engine->ProcessingTask();
             vTaskDelete(nullptr);
         },
         "audio_afe", kProcessingTaskStackSize, this, 3, processing_task_stack_,
-        processing_task_buffer_);
+        processing_task_buffer_, kAfeTaskCore);
     if (processing_task_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create AFE processing task, internal free=%u largest=%u",
                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL),

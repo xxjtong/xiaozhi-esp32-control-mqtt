@@ -181,7 +181,7 @@ xiaozhi-esp32-main/
 | 唤醒词 | **“你好，邵怡”**（`ni hao shao yi`，自定义 MultiNet 配置；命令在 `assets/index.json`，换词必须同时烧 app 与 `generated_assets.bin`） |
 | 代码 | [main/boards/waveshare/esp32-s3-touch-lcd-4b/](main/boards/waveshare/esp32-s3-touch-lcd-4b/) |
 
-> 4B 已使用 `CustomLcdDisplay`（双击/三击手势、公司 logo、IMU/RTC、无电池判定已接）；控制通道、设备 MCP、音频链路与板级无关。2026-11-05 真机验证：空闲态双击进聆听、三击换主题、IMU 晃动进聆听、说“你好，邵怡”唤醒均通过。完整根因、修复组合、烧录坑与验证记录见 [docs/2026-11-05-4b-idle-activation-fix.md](docs/2026-11-05-4b-idle-activation-fix.md)。
+> 4B 已使用 `CustomLcdDisplay`（双击/三击手势、公司 logo、IMU/RTC、无电池判定已接）；控制通道、设备 MCP、音频链路与板级无关。2026-11-05 真机验证：空闲态双击进聆听、三击换主题、IMU 晃动进聆听、说“你好，邵怡”唤醒均通过。完整根因、修复组合、烧录坑与验证记录见 [docs/2026-11-05-4b-idle-activation-fix.md](docs/2026-11-05-4b-idle-activation-fix.md)；2026-11-06 的 TTS 解码饿死、唤醒绑核/阈值、AEC NLP 与 `SetEmotion/SetTheme` 未持 LVGL 锁导致的闪烁/卡连接修复见 [docs/2026-11-06-4b-audio-flicker-lock-fix.md](docs/2026-11-06-4b-audio-flicker-lock-fix.md)。
 
 **当前测试：Waveshare ESP32-S3-Touch-LCD-3.49 V2**
 

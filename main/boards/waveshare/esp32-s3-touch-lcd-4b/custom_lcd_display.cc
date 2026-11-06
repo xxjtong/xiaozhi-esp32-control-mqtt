@@ -284,6 +284,11 @@ void CustomLcdDisplay::ToggleTheme() {
 // 只有开机（robot_2）和空闲（idle + neutral）这两种"没有意义表情"的状态才把
 // emoji 容器整个隐藏，让画面只剩 logo。
 void CustomLcdDisplay::SetEmotion(const char* emotion) {
+    // SetEmotion() 由 main 任务在状态切换时调用，也可能被 LVGL 任务调用；
+    // 这里对 emoji_box_ 的 add/remove_flag 必须在 LVGL 锁内执行，否则会和
+    // LVGL 任务并发修改对象树/堆，实测会卡在 lv_tlsf_free 并触发 10s 看门狗。
+    DisplayLockGuard lock(this);
+
     if (emotion == nullptr) {
         if (emoji_box_ != nullptr) {
             lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
@@ -344,6 +349,9 @@ void CustomLcdDisplay::ShowCompanyLogo() {
 }
 
 void CustomLcdDisplay::SetTheme(Theme* theme) {
+    // 同 SetEmotion：远程 set_theme / 三击切主题都可能从 main 任务进入，
+    // ApplyBottomLayer() 会直接改 container_/screen 的样式，必须持有 LVGL 锁。
+    DisplayLockGuard lock(this);
     RgbLcdDisplay::SetTheme(theme);
     // 主题切换会重设屏幕背景与配色，底层壁纸需要跟着重贴
     ApplyBottomLayer();
