@@ -19,7 +19,9 @@
 - logo 闪烁消失
 - 空闲唤醒成功（日志 `prob=0.244994`）
 - 长 TTS 完整播放，字幕与音频同步
-- 长对话期间 **0 次 `task_wdt`**、**0 次 `Decode queue is full`**
+- 交互窗口（09:39~09:42）**0 次 `task_wdt`**、**0 次 `Decode queue is full`**
+- 09:44 之后连续空闲仍会周期性打印 `task_wdt`（`audio_input`/`audio_afe` 双核吃满），
+  非 panic/复位，不影响 UI 与音频；说明 AEC 高配 + MultiNet 仍接近满载（见 §7）
 
 ---
 
@@ -209,7 +211,9 @@ void CustomLcdDisplay::SetTheme(Theme* theme) {
 
 ### 4.4 验证
 
-- 30s 空闲 + 长对话 + 多次唤醒：**0 次 `task_wdt`**
+- 交互窗口（30s 空闲 + 长对话 + 多次唤醒）：**0 次 `task_wdt`**
+- 09:44 之后连续空闲：仍周期性出现 `task_wdt`（`CPU 0: audio_input` /
+  `CPU 1: audio_afe`），非 panic，不改状态、不中断音频
 - logo 闪烁消失
 - “连接中”不再卡死；网络失败时能正常回到 idle/错误提示
 - 长 TTS 完整播放，字幕与音频同步
@@ -243,7 +247,8 @@ void CustomLcdDisplay::SetTheme(Theme* theme) {
 （长对话 / 多轮 TTS）
 ```
 
-- `task_wdt` 次数：0
+- 交互窗口 `task_wdt` 次数：0
+- 09:44 之后长时空闲：仍周期性 `task_wdt`（非 panic）
 - `Decode queue is full` 次数：0
 - 用户确认：闪烁消失，唤醒/TTS 正常
 
@@ -265,8 +270,9 @@ python3 -m unittest discover -s scripts/tests
 3. **任务优先级**：`audio_output`/`opus_codec` 为 5，高于 LVGL 4 和
    `audio_afe` 3；正常解码/播放是短突发。若 UI 明显卡顿，可把两者降到 4
    并观察 TTS；不建议再降到 2。
-4. **看门狗**：本次长对话 0 次，但 AEC 高配 + MultiNet 仍接近满载；若后续
-   回归，优先考虑降低 AEC NLP/改服务端 AEC，而不是继续调绑核。
+4. **看门狗**：交互窗口 0 次，但 09:44 之后连续空闲已复现周期性 `task_wdt`；
+   AEC 高配 + MultiNet 仍接近满载。它当前不 panic、不中断功能，但如果要彻底
+   消掉，优先考虑服务端 AEC / 更轻的唤醒模型，而不是继续调绑核。
 5. **LVGL 并发**：本次只修了 `CustomLcdDisplay` 的两个入口；新增任何在 main
    任务里直接操作 LVGL 对象的代码，都必须用 `DisplayLockGuard`。
 
