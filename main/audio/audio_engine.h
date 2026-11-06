@@ -21,6 +21,9 @@ public:
     virtual void EnableWakeWordDetection(bool enable) = 0;
     virtual void EnableVoiceProcessing(bool enable) = 0;
     virtual void EnableDeviceAec(bool enable) = 0;
+    // 回声消除只在“可能有播放回声”的状态需要；空闲态可以关 AEC，
+    // 但唤醒词/前端仍然持续运行。默认 no-op，Lite 引擎不需要。
+    virtual void SetAecRequired(bool required) { (void)required; }
 
     virtual bool HasWakeWord() const = 0;
     virtual bool IsWakeWordDetectionEnabled() const = 0;

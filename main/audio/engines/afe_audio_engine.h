@@ -31,6 +31,7 @@ public:
     void EnableWakeWordDetection(bool enable) override;
     void EnableVoiceProcessing(bool enable) override;
     void EnableDeviceAec(bool enable) override;
+    void SetAecRequired(bool required) override;
 
     bool HasWakeWord() const override;
     bool IsWakeWordDetectionEnabled() const override;
@@ -70,6 +71,11 @@ private:
     int frame_samples_ = 0;
     bool is_speaking_ = false;
     std::atomic<bool> device_aec_enabled_{false};
+    // AEC 是否“当前状态需要”由 Application 设置：Listening/Speaking/Notifying 为 true，
+    // Idle/Connecting 为 false。与 device_aec_enabled_（用户/配置总开关）是 AND 关系。
+    std::atomic<bool> aec_required_{false};
+    // 上次实际下发的 AEC 状态，仅用于变化时打一条日志
+    bool aec_enabled_applied_ = false;
     // Deferred AFE buffer reset, performed by ProcessingTask (see UpdateActiveState)
     std::atomic<bool> reset_pending_{false};
     // Deferred WakeNet/AEC toggles, applied by ProcessingTask (see ApplyAfeControls)

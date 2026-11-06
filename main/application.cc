@@ -1065,6 +1065,14 @@ void Application::HandleStateChangedEvent() {
     // the Listening case below re-arms it when needed.
     pending_listening_start_ = false;
 
+    // AEC 只在可能有设备自身播放回声的状态开启：
+    //   Listening / Speaking / Notifying -> on
+    //   Idle / Connecting / Activating ... -> off
+    // 唤醒词检测（MultiNet/AFE feed/fetch）不受影响，Idle 下仍持续运行。
+    audio_service_.SetAecRequired(new_state == kDeviceStateListening ||
+                                  new_state == kDeviceStateSpeaking ||
+                                  new_state == kDeviceStateNotifying);
+
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
     auto led = board.GetLed();

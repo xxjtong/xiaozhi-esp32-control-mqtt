@@ -816,6 +816,14 @@ void AudioService::EnableDeviceAec(bool enable) {
     }
 }
 
+void AudioService::SetAecRequired(bool required) {
+    aec_required_.store(required);
+    if (audio_engine_initialized_) {
+        audio_engine_->SetAecRequired(required);
+    }
+    // 引擎还没初始化时只记住状态，InitializeAudioEngine() 会补下发。
+}
+
 void AudioService::SetCallbacks(AudioServiceCallbacks& callbacks) { callbacks_ = callbacks; }
 
 void AudioService::PlaySound(const std::string_view& ogg) {
@@ -934,5 +942,6 @@ bool AudioService::InitializeAudioEngine() {
     }
     audio_engine_initialized_ = true;
     audio_engine_->EnableDeviceAec(device_aec_enabled_);
+    audio_engine_->SetAecRequired(aec_required_.load());
     return true;
 }

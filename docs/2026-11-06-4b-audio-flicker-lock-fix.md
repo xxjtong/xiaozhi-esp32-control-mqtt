@@ -20,8 +20,8 @@
 - 空闲唤醒成功（日志 `prob=0.244994`）
 - 长 TTS 完整播放，字幕与音频同步
 - 交互窗口（09:39~09:42）**0 次 `task_wdt`**、**0 次 `Decode queue is full`**
-- 09:44 之后连续空闲仍会周期性打印 `task_wdt`（`audio_input`/`audio_afe` 双核吃满），
-  非 panic/复位，不影响 UI 与音频；说明 AEC 高配 + MultiNet 仍接近满载（见 §7）
+- 09:44 之后连续空闲曾周期性打印 `task_wdt`（`audio_input`/`audio_afe` 双核吃满）；
+  追加 **状态门控 AEC** 后，10 分钟空闲 **0 次 `task_wdt`**（见 §4.5）
 
 ---
 
@@ -219,15 +219,57 @@ void CustomLcdDisplay::SetTheme(Theme* theme) {
 - 长 TTS 完整播放，字幕与音频同步
 - 空闲唤醒日志：`prob=0.244994`，进入 `idle -> connecting -> listening`
 
+### 4.5 追加：状态门控 AEC（2026-11-06 下午）
+
+锁修复后长时空闲仍有 `task_wdt`（`audio_input`/`audio_afe` 双核吃满）。根因：
+AEC 在 Idle 仍随 `kWakeWordEnabled` 开启；空闲没有播放，AEC 没有回声参考可消，
+却持续占 core 0 的 DSP。
+
+改动：
+
+- `AudioEngine` 新增 `SetAecRequired(bool)`（Lite 引擎默认 no-op）；
+- `AfeAudioEngine::SetAecRequired()` 设置 `aec_required_`，由 `ApplyAfeControls()` 应用：
+  ```cpp
+  const bool enable_aec = device_aec_enabled_.load() &&
+                          (aec_required_.load() || (bits & kVoiceProcessingEnabled));
+  ```
+  并在状态变化时打印 `AEC on/off (wake/voice/required)`；
+- `AudioService::SetAecRequired()` 记住并下发给引擎；
+- `Application::HandleStateChangedEvent()` 按状态设置：
+  - `Listening / Speaking / Notifying` → `true`
+  - `Idle / Connecting / Activating / ...` → `false`
+- **MultiNet 不受影响**：Idle 下仍 `EnableWakeWordDetection(true)`，AFE feed/fetch
+  持续运行；关的只是 AEC 这一级 DSP。
+
+10 分钟空闲 + 多轮对话验证：
+
+```text
+AEC on  (wake=0 voice=1 required=1)   # Listening
+AEC off (wake=1 voice=0 required=0)   # Idle，MultiNet 仍在跑
+Custom wake word detected ... prob=0.189964
+Custom wake word detected ... prob=0.268940
+Custom wake word detected ... prob=0.165524
+```
+
+- `task_wdt`：**0 次**
+- `Decode queue is full`：**0 次**
+- 用户确认：watchdog 消失，唤醒/TTS 正常
+
+> 边界：若 `tts stop` 后播放队列还有约 1~2 帧（~120ms）尾音，此时状态已回 Idle、
+> AEC 已关，理论上可能让最后一点尾音进入麦克风。当前实测未出现自唤醒；若以后
+> 出现，可加 500ms 尾音保持，或改成“最近播放时间戳”门控。
+
 ---
 
 ## 5. 改动文件
 
 | 文件 | 改动 |
 |---|---|
-| `main/audio/audio_service.cc` | 解码/播放优先级 5 + 固定 core 1；decode queue 丢包日志 |
-| `main/audio/audio_service.h` | `decode_drop_count`、`last_decode_drop_log_time_` |
-| `main/audio/engines/afe_audio_engine.cc` | `audio_afe` 固定 core 1；AEC NLP `NORMAL` |
+| `main/audio/audio_service.cc` | 解码/播放优先级 5 + 固定 core 1；decode queue 丢包日志；`SetAecRequired` 存储/下发 |
+| `main/audio/audio_service.h` | `decode_drop_count`、`last_decode_drop_log_time_`、`aec_required_` |
+| `main/audio/audio_engine.h` | 新增 `SetAecRequired(bool)` 虚接口（Lite 默认 no-op） |
+| `main/audio/engines/afe_audio_engine.cc` / `.h` | `audio_afe` 固定 core 1；AEC NLP `NORMAL`；`aec_required_` 门控与 `AEC on/off` 日志 |
+| `main/application.cc` | `HandleStateChangedEvent` 按 Listening/Speaking/Notifying 设置 AEC 需求 |
 | `main/boards/waveshare/esp32-s3-touch-lcd-4b/custom_lcd_display.cc` | `SetEmotion`/`SetTheme` 加 LVGL 锁 |
 | `main/boards/waveshare/esp32-s3-touch-lcd-4b/config.json` | 唤醒阈值 20→15 |
 
@@ -247,10 +289,10 @@ void CustomLcdDisplay::SetTheme(Theme* theme) {
 （长对话 / 多轮 TTS）
 ```
 
-- 交互窗口 `task_wdt` 次数：0
-- 09:44 之后长时空闲：仍周期性 `task_wdt`（非 panic）
+- 状态门控 AEC 后 10 分钟空闲 + 多轮对话：`task_wdt` **0 次**
 - `Decode queue is full` 次数：0
-- 用户确认：闪烁消失，唤醒/TTS 正常
+- AEC 实际状态：`AEC on`（Listening）↔ `AEC off`（Idle，MultiNet 仍运行）
+- 用户确认：闪烁消失，watchdog 消失，唤醒/TTS 正常
 
 主机测试：
 
@@ -270,10 +312,12 @@ python3 -m unittest discover -s scripts/tests
 3. **任务优先级**：`audio_output`/`opus_codec` 为 5，高于 LVGL 4 和
    `audio_afe` 3；正常解码/播放是短突发。若 UI 明显卡顿，可把两者降到 4
    并观察 TTS；不建议再降到 2。
-4. **看门狗**：交互窗口 0 次，但 09:44 之后连续空闲已复现周期性 `task_wdt`；
-   AEC 高配 + MultiNet 仍接近满载。它当前不 panic、不中断功能，但如果要彻底
-   消掉，优先考虑服务端 AEC / 更轻的唤醒模型，而不是继续调绑核。
-5. **LVGL 并发**：本次只修了 `CustomLcdDisplay` 的两个入口；新增任何在 main
+4. **看门狗**：状态门控 AEC 后 10 分钟空闲 **0 次**；AEC+MultiNet 仍接近满载，
+   但空闲不再跑无用的 AEC。若以后在高负载场景回归，优先考虑 16kHz、服务端 AEC
+   或更轻的 WakeNet 模型，而不是继续调绑核。
+5. **AEC 尾音**：状态回 Idle 时 AEC 立即关；若 `tts stop` 后还有 ~120ms 尾音，
+   理论上可能进麦克风。当前实测无自唤醒；若出现，加 500ms 尾音保持或改播放时间戳门控。
+6. **LVGL 并发**：本次只修了 `CustomLcdDisplay` 的两个入口；新增任何在 main
    任务里直接操作 LVGL 对象的代码，都必须用 `DisplayLockGuard`。
 
 ---

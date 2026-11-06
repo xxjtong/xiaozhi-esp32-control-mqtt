@@ -139,6 +139,9 @@ public:
     void EnableVoiceProcessing(bool enable);
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
+    // 按设备状态设置“当前是否需要 AEC”（Listening/Speaking/Notifying 为 true）。
+    // 与 EnableDeviceAec() 的总开关是 AND 关系；唤醒词检测不受影响。
+    void SetAecRequired(bool required);
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
@@ -212,6 +215,8 @@ private:
 #else
     bool device_aec_enabled_ = false;
 #endif
+    // 应用层按状态设置；引擎初始化/未初始化都要记住，见 SetAecRequired()。
+    std::atomic<bool> aec_required_{false};
     std::atomic<bool> service_stopped_{true};
     std::atomic<bool> audio_input_need_warmup_{false};
 

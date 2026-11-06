@@ -336,6 +336,15 @@ void AfeAudioEngine::EnableDeviceAec(bool enable) {
     UpdateAecState();
 }
 
+void AfeAudioEngine::SetAecRequired(bool required) {
+    // 只改“状态是否需要 AEC”，不改变唤醒词/前端运行状态。MultiNet 仍然持续
+    // feed/fetch；Idle 下关 AEC 只是跳过没有回声参考的 DSP。
+    if (aec_required_.exchange(required) == required) {
+        return;
+    }
+    afe_control_dirty_ = true;
+}
+
 bool AfeAudioEngine::HasWakeWord() const { return wake_detector_ != WakeDetector::kNone; }
 
 bool AfeAudioEngine::IsWakeWordDetectionEnabled() const {
@@ -409,12 +418,23 @@ void AfeAudioEngine::ApplyAfeControls() {
         }
     }
     if (codec_->input_reference()) {
-        const bool enable_aec = (bits & kWakeWordEnabled) ||
-                                (device_aec_enabled_.load() && (bits & kVoiceProcessingEnabled));
+        // AEC 只消设备自身播放的回声：Idle/Connecting 没有播放，不需要；
+        // Listening/Speaking/Notifying 由 Application 置 aec_required_。
+        // device_aec_enabled_ 是用户/配置总开关，关闭时任何状态都不开 AEC。
+        const bool enable_aec =
+            device_aec_enabled_.load() &&
+            (aec_required_.load() || (bits & kVoiceProcessingEnabled));
         if (enable_aec) {
             afe_iface_->enable_aec(afe_data_);
         } else {
             afe_iface_->disable_aec(afe_data_);
+        }
+        if (aec_enabled_applied_ != enable_aec) {
+            aec_enabled_applied_ = enable_aec;
+            ESP_LOGI(TAG, "AEC %s (wake=%d voice=%d required=%d)",
+                     enable_aec ? "on" : "off", (bits & kWakeWordEnabled) ? 1 : 0,
+                     (bits & kVoiceProcessingEnabled) ? 1 : 0,
+                     aec_required_.load() ? 1 : 0);
         }
     }
 }
