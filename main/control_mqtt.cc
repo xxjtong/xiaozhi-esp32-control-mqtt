@@ -22,6 +22,7 @@
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include <freertos/idf_additions.h>
 
 #include <cstdint>
 #include <cstdlib>
@@ -634,6 +635,7 @@ struct ImageFetchArgs {
     std::string url;
     bool is_background = false;  // true: set as wallpaper; false: floating preview
     std::shared_ptr<std::atomic<bool>> alive;
+    bool stack_in_psram = false;  // task must be deleted with vTaskDeleteWithCaps()
 };
 
 // Decoded/downloaded image handed over to the main task.
@@ -809,7 +811,7 @@ void ControlMqtt::HandleSetImage(cJSON* root) {
         (cJSON_IsString(mode_j) && std::string(mode_j->valuestring) == "background");
 
     auto* args =
-        new (std::nothrow) ImageFetchArgs{this, url_j->valuestring, is_background, alive_};
+        new (std::nothrow) ImageFetchArgs{this, url_j->valuestring, is_background, alive_, true};
     if (args == nullptr) {
         SendReply("set_image", false);
         return;
@@ -820,21 +822,34 @@ void ControlMqtt::HandleSetImage(cJSON* root) {
         SendReply("set_image", false, "", MakeErrorExtra("another image download is in progress"));
         return;
     }
-    // JPEG decoding is CPU heavy, so it stays on this task as well.
-    if (xTaskCreate(ImageFetchTaskEntry, "ctrl_image", 4096 * 3, args, 3, nullptr) != pdPASS) {
+    // JPEG decoding is CPU heavy, so it stays on this task as well. The stack
+    // lives in PSRAM: on the 4B, AFE leaves only a few KB of contiguous internal
+    // RAM, so a 12 KB internal stack cannot be allocated at runtime.
+    constexpr size_t kImageTaskStackSize = 4096 * 3;
+    BaseType_t created = xTaskCreateWithCaps(ImageFetchTaskEntry, "ctrl_image", kImageTaskStackSize,
+                                             args, 3, nullptr,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (created != pdPASS) {
+        ESP_LOGW(TAG, "PSRAM stack for ctrl_image unavailable, falling back to internal RAM");
+        args->stack_in_psram = false;
+        created = xTaskCreate(ImageFetchTaskEntry, "ctrl_image", kImageTaskStackSize, args, 3,
+                              nullptr);
+    }
+    if (created != pdPASS) {
         ESP_LOGE(TAG, "Failed to create image download task");
         image_fetch_running_ = false;
         delete args;
-        SendReply("set_image", false);
+        SendReply("set_image", false, "", MakeErrorExtra("failed to create image task"));
     }
 }
 
 void ControlMqtt::ImageFetchTaskEntry(void* arg) {
     std::unique_ptr<ImageFetchArgs> args(static_cast<ImageFetchArgs*>(arg));
-    // Captured up front: the flag has to be cleared manually before vTaskDelete(),
+    // Captured up front: the flag has to be cleared manually before vTaskDeleteWithCaps(),
     // because a stack destructor would never run afterwards.
     ControlMqtt* self = args->self;
     auto alive = args->alive;
+    const bool stack_in_psram = args->stack_in_psram;
     char* data = nullptr;
     size_t total = 0;
     const char* fail_reason = "download failed";
@@ -907,10 +922,14 @@ void ControlMqtt::ImageFetchTaskEntry(void* arg) {
         self->image_fetch_running_ = false;
         Application::GetInstance().Schedule([self, alive]() {
             if (*alive) {
-                self->SendReply("set_image", false);
+                self->SendReply("set_image", false, "", MakeErrorExtra("out of memory"));
             }
         });
-        vTaskDelete(nullptr);
+        if (stack_in_psram) {
+            vTaskDeleteWithCaps(nullptr);
+        } else {
+            vTaskDelete(nullptr);
+        }
         return;
     }
     pending->data = data;
@@ -1035,7 +1054,11 @@ void ControlMqtt::ImageFetchTaskEntry(void* arg) {
     });
 
     self->image_fetch_running_ = false;
-    vTaskDelete(nullptr);
+    if (stack_in_psram) {
+        vTaskDeleteWithCaps(nullptr);
+    } else {
+        vTaskDelete(nullptr);
+    }
 }
 
 void ControlMqtt::HandleSetTheme(cJSON* root) {

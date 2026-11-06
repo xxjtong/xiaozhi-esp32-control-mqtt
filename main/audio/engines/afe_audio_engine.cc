@@ -418,12 +418,14 @@ void AfeAudioEngine::ApplyAfeControls() {
         }
     }
     if (codec_->input_reference()) {
-        // AEC 只消设备自身播放的回声：Idle/Connecting 没有播放，不需要；
-        // Listening/Speaking/Notifying 由 Application 置 aec_required_。
+        // AEC 只消设备自身播放的回声：只有 Speaking/Notifying 由 Application
+        // 置 aec_required_；Listening 没有本地播放，AEC 保持关闭。
         // device_aec_enabled_ 是用户/配置总开关，关闭时任何状态都不开 AEC。
-        const bool enable_aec =
-            device_aec_enabled_.load() &&
-            (aec_required_.load() || (bits & kVoiceProcessingEnabled));
+        // Only the application's state gate decides when AEC is needed.
+        // kVoiceProcessingEnabled is also set while listening, but listening has
+        // no local playback; keeping AEC on there saturates core 0 and starves
+        // IDLE0/esp_timer, which shows up as occasional screen jitter.
+        const bool enable_aec = device_aec_enabled_.load() && aec_required_.load();
         if (enable_aec) {
             afe_iface_->enable_aec(afe_data_);
         } else {

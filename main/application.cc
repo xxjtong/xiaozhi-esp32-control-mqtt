@@ -1065,12 +1065,13 @@ void Application::HandleStateChangedEvent() {
     // the Listening case below re-arms it when needed.
     pending_listening_start_ = false;
 
-    // AEC 只在可能有设备自身播放回声的状态开启：
-    //   Listening / Speaking / Notifying -> on
-    //   Idle / Connecting / Activating ... -> off
-    // 唤醒词检测（MultiNet/AFE feed/fetch）不受影响，Idle 下仍持续运行。
-    audio_service_.SetAecRequired(new_state == kDeviceStateListening ||
-                                  new_state == kDeviceStateSpeaking ||
+    // AEC 只在设备可能播放声音、需要消除自身回声的状态开启：
+    //   Speaking / Notifying -> on
+    //   Listening / Idle / Connecting ... -> off
+    // Listening 阶段本地没有播放，AEC 继续跑只会让 core 0 的 AEC DSP
+    // 长时间满载，饿死 IDLE0/esp_timer，表现为屏幕内容偶发抖动。
+    // 进入 Speaking 时 TTS 还未开始播放，AEC 会先打开，不影响回声消除。
+    audio_service_.SetAecRequired(new_state == kDeviceStateSpeaking ||
                                   new_state == kDeviceStateNotifying);
 
     auto& board = Board::GetInstance();

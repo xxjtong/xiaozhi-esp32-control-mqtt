@@ -8,6 +8,7 @@
 #include <esp_lvgl_port.h>
 #include "assets/lang_config.h"
 #include <cstring>
+#include <utility>
 
 #include "board.h"
 #include "application.h"
@@ -86,6 +87,12 @@ void CustomLcdDisplay::SetupUI() {
     lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_CLICKABLE);
+
+    // 小智表情默认在屏幕正中，正好盖住居中的公司 logo。上移 1/4 屏高后，
+    // 表情中心位于屏幕上方 1/4 处；如需改到下方 1/4，把偏移量改为 +LV_VER_RES/4。
+    const int kEmojiVerticalOffset = -(LV_VER_RES / 4);
+    lv_obj_align(emoji_box_, LV_ALIGN_CENTER, 0, kEmojiVerticalOffset);
+    ESP_LOGI(TAG, "Emoji box aligned to upper quarter (offset=%d)", kEmojiVerticalOffset);
 
     // 覆盖已有对象树，并监听后续动态创建的对象
     EnableEventBubbling(container_);
@@ -176,8 +183,15 @@ CustomLcdDisplay::DoubleClickAction CustomLcdDisplay::ResolveDoubleClickAction()
         pending_clear_target_ = nullptr;
     }
 
-    // 空闲时双击 = 进入聆听，与 BOOT 键、唤醒词走同一条状态机路径。
-    if (state == kDeviceStateIdle) {
+    // 聆听中双击 = 返回空闲。
+    if (state == kDeviceStateListening) {
+        return DoubleClickAction::kStopListening;
+    }
+
+    // 空闲或说话/音乐播放中双击 = 进入聆听，与 BOOT 键、唤醒词走同一条
+    // 状态机路径。Speaking 下 HandleStartListeningEvent() 会先 AbortSpeaking()
+    // 再切到 Listening，等价于语音打断。
+    if (state == kDeviceStateIdle || state == kDeviceStateSpeaking) {
         return DoubleClickAction::kStartListening;
     }
 
@@ -218,13 +232,25 @@ void CustomLcdDisplay::RunDoubleClickAction() {
             preview_image_cached_.get() == pending_clear_target_) {
             ClearPreviewImage();
         }
-    } else if (action == DoubleClickAction::kStartListening) {
-        ESP_LOGI(TAG, "Double-click: entering listening from idle");
-        // StartListening() 只置事件位，但 GetDefaultListeningMode() 读的是主任务
-        // 字段；统一丢回主任务执行，和 IMU 触发聆听的路径保持一致。
+    } else if (action == DoubleClickAction::kStopListening) {
+        ESP_LOGI(TAG, "Double-click: leaving listening");
         Application::GetInstance().Schedule([]() {
             auto& app = Application::GetInstance();
-            if (app.GetDeviceState() != kDeviceStateIdle) {
+            if (app.GetDeviceState() != kDeviceStateListening) {
+                return;
+            }
+            app.StopListening();
+        });
+    } else if (action == DoubleClickAction::kStartListening) {
+        ESP_LOGI(TAG, "Double-click: entering listening");
+        // StartListening() 只置事件位，但 GetDefaultListeningMode() 读的是主任务
+        // 字段；统一丢回主任务执行，和 IMU 触发聆听的路径保持一致。
+        // Idle 与 Speaking（音乐/TTS 播放中）都允许；Speaking 下由
+        // HandleStartListeningEvent() 先打断当前播放再进入 Listening。
+        Application::GetInstance().Schedule([]() {
+            auto& app = Application::GetInstance();
+            auto state = app.GetDeviceState();
+            if (state != kDeviceStateIdle && state != kDeviceStateSpeaking) {
                 return;
             }
             app.StartListening(app.GetDefaultListeningMode());
@@ -331,6 +357,14 @@ void CustomLcdDisplay::ApplyBottomLayer() {
 
 void CustomLcdDisplay::ShowCompanyLogo() {
     DisplayLockGuard lock(this);
+    // Remote wallpaper owns the bottom layer while it is active; keep the
+    // company logo out of the way instead of letting it overlay the image.
+    if (wallpaper_active_.load()) {
+        if (logo_image_ != nullptr) {
+            lv_obj_add_flag(logo_image_, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
     if (logo_image_ == nullptr) {
         if (container_ == nullptr) {
             return;
@@ -356,4 +390,31 @@ void CustomLcdDisplay::SetTheme(Theme* theme) {
     // 主题切换会重设屏幕背景与配色，底层壁纸需要跟着重贴
     ApplyBottomLayer();
     ShowCompanyLogo();
+}
+
+bool CustomLcdDisplay::SetBackgroundImage(std::unique_ptr<LvglImage> image) {
+    // Set the flag before calling the base implementation: its SetTheme()
+    // callback runs ShowCompanyLogo() and must know the wallpaper is active.
+    const bool was_active = wallpaper_active_.exchange(true);
+    if (!LcdDisplay::SetBackgroundImage(std::move(image))) {
+        wallpaper_active_.store(was_active);
+        return false;
+    }
+    DisplayLockGuard lock(this);
+    if (logo_image_ != nullptr) {
+        lv_obj_add_flag(logo_image_, LV_OBJ_FLAG_HIDDEN);
+    }
+    ESP_LOGI(TAG, "Wallpaper active: company logo hidden");
+    return true;
+}
+
+void CustomLcdDisplay::ClearBackgroundImage() {
+    const bool was_active = wallpaper_active_.exchange(false);
+    LcdDisplay::ClearBackgroundImage();
+    // Base ClearBackgroundImage() calls SetTheme() -> ShowCompanyLogo(); the
+    // flag is already false there, so the logo comes back with the new theme.
+    ShowCompanyLogo();
+    if (was_active) {
+        ESP_LOGI(TAG, "Wallpaper cleared: company logo restored");
+    }
 }

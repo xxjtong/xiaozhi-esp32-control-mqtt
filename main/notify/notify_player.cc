@@ -12,7 +12,10 @@
 #include "ogg_demuxer.h"
 
 namespace {
-constexpr int kHttpTimeoutMs = 5000;
+// The control-plane notify URL may be behind a CDN: on the 4B, a TLS
+// handshake alone can take ~10 s, and the 5 s header timeout used to
+// fail every HTTPS broadcast before the first audio byte arrived.
+constexpr int kHttpTimeoutMs = 20000;
 constexpr size_t kHttpReadBufferSize = 1024;
 constexpr uint32_t kNotifyTaskStackSize = 6144;
 constexpr UBaseType_t kNotifyTaskPriority = 2;

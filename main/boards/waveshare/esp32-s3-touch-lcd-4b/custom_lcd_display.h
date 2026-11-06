@@ -3,11 +3,13 @@
 
 #include "lcd_display.h"
 
+#include <atomic>
+
 // 4B 板的"定制 LcdDisplay"：显示管线完全复用 RgbLcdDisplay（RGB 并口 + lvgl_port 的
 // bounce buffer/双缓冲机制已经处理好刷新，不需要 3.49-V2 那套手写 flush），
 // 这里只叠加板级交互能力：
 //   1. SetupUI：注册屏幕双击/三击手势
-//      - 双击：播报中停播报；有预览图清预览图；空闲时进入聆听（与 BOOT/唤醒词一致）
+//      - 双击：播报中停播报；有预览图清预览图；空闲/说话中进入聆听，聆听中返回空闲
 //      - 三击：切换 light/dark 主题
 //   2. SetEmotion/SetTheme：空闲与开机时用公司 logo 替代默认机器人图标
 class CustomLcdDisplay : public RgbLcdDisplay {
@@ -24,6 +26,9 @@ public:
     virtual void SetEmotion(const char* emotion) override;
     // 主题切换后 logo 需要换成深/浅色版本
     virtual void SetTheme(Theme* theme) override;
+    // 远程壁纸与公司 logo 互斥：有壁纸时隐藏 logo，清壁纸后恢复
+    bool SetBackgroundImage(std::unique_ptr<LvglImage> image) override;
+    void ClearBackgroundImage() override;
 
 private:
     // 双击动作要等确认窗口结束才执行：窗口内来了第三击就改成三击切主题。
@@ -31,7 +36,8 @@ private:
         kNone = 0,
         kStopNotification,  // 播报中：停止播报
         kClearPreview,      // 有常驻预览图：清除预览图
-        kStartListening,    // 空闲：进入聆听（与 BOOT 键、唤醒词一致）
+        kStartListening,    // 空闲/说话中：进入聆听（与 BOOT 键、唤醒词一致）
+        kStopListening,     // 聆听中：返回空闲
     };
 
     // 屏幕点击事件回调（自行判定双击/三击，见 .cc 中的说明）
@@ -57,6 +63,8 @@ private:
     // 背景图（公司 logo）挂在 container_ 里，位于所有控件之下
     void ApplyBottomLayer();
     lv_obj_t* logo_image_ = nullptr;
+    // 远程壁纸是否激活；跨 main/LVGL 任务访问，使用原子量
+    std::atomic<bool> wallpaper_active_{false};
     // 上一次短按的 tick（0 表示还没有上一次点击）
     uint32_t last_click_tick_ = 0;
     // 当前连续点击次数：1=单击，2=双击，3=三击
