@@ -242,7 +242,7 @@ RgbLcdDisplay::RgbLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     // 轮询。原来 50ms 一次：静止的空闲界面下，一次短于 50ms 的点击可能完全
     // 不被采样，表现为空闲时双击/三击时灵时不灵；聆听中界面有动画、任务跑得
     // 更勤，反而正常。降到 10ms（100Hz）保证短按也能被采到。
-    port_cfg.timer_period_ms = 10;
+    port_cfg.timer_period_ms = 50;  // 对齐上游；10ms 时触摸轮询 100Hz，白白占用共享 I2C 总线
 #if CONFIG_SOC_CPU_CORES_NUM > 1
     // 4B 的 AEC 高配 DSP 跑在 audio_input（core 0）里，afe_feed 会长时间占满
     // core 0；MultiNet/AFE（audio_afe）在 core 1 上优先级 3，空闲态也会长时间

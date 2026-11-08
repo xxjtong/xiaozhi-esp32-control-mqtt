@@ -416,7 +416,8 @@ private:
                 auto* board = static_cast<WaveshareEsp32s3TouchLCD4b*>(arg);
                 while (true) {
                     board->CheckKeyState();
-                    vTaskDelay(pdMS_TO_TICKS(20));
+                    // 与 LVGL 触摸轮询周期（50ms）保持一致，避免两条任务以不同节奏抢同一条 I2C 总线
+                    vTaskDelay(pdMS_TO_TICKS(50));
                 }
             },
             "key_monitor_task",
